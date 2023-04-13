@@ -3,8 +3,8 @@
 #1. Parametros recibidos por la linea de comandos
 #
 #    -d -> DB Name
-#    -o -> Output file name (optional)
-#    -t -> (Tables) Comma separated string of table names to export to, if not defined, it's going to export all DB's tables.
+#    -o -> Output file name, without extension file name (optional)
+#    -t -> (Tables) Comma separated string of table names to export to, if not defined, it's going to export all DB's tables. (optional)
 #    -c -> (Containerized) It indicates whether mysql/mariadb is runing inside a container technology or not.
 
 #Loads param variables
@@ -38,20 +38,22 @@ function convertir_comas_a_espacios() {
 dbName=""
 outputFileName=""
 tablesToExport="All"
-containerized="no"
+containerized="0"
 
 # Analizar las opciones de línea de comandos
-while getopts ":d:o:t:c" opt; do
+while getopts ":d:o:t:c:" opt; do
   case $opt in
     d) dbName=$OPTARG;;
     o) outputFileName=$OPTARG;;
     t) tablesToExport=$OPTARG;;
-    c) containerized="yes"
+    c) containerized=$OPTARG;;
     \?) echo "Opción inválida: -$OPTARG" >&2;;
     :) echo "La opción -$OPTARG requiere un argumento." >&2;;
   esac
 done
 
+
+echo "Containerized: $containerized"
 
 if [[ -z $dbName ]]
 then
@@ -76,12 +78,26 @@ echo "Borrando los archivos iniciales"
 #Exporta los datos desde Mysql
 echo "Iniciando la exportación de datos mysql"
 
-if [ "$tablesToExport" == "All"  ]]
+if [[ "$tablesToExport" == "All"  ]]
 then
-    /usr/bin/mysqldump -u "$DB_USER" --password="$DB_PWD" "$dbName" > "$PATH_TO_FILES/$outputFileName.sql"
+    if [[ "$containerized" != '0' ]]
+    then
+        echo "Exportando desde una base de datos contenerizada"
+	docker exec -i "$containerized" sh -c "exec mysqldump -u $DB_USER -p\"$DB_PWD\" $dbName" > "$PATH_TO_FILES/$outputFileName.sql"
+    else
+        echo "Exportando datos desde una instancia de DB que corre directamente en el servidor"
+        /usr/bin/mysqldump -u "$DB_USER" --password="$DB_PWD" "$dbName" > "$PATH_TO_FILES/$outputFileName.sql"
+    fi
 else
     canalesForMysqldump=$(convertir_comas_a_espacios "$tablesToExport")
-    /usr/bin/mysqldump -u "$DB_USER" --password="$DB_PWD" --no-create-info "$dbName" $canalesForMysqldump > "$PATH_TO_FILES/$outputFileName.sql"
+    if [[ "$containerized" != '0' ]]
+    then
+        echo "Exportando desde una base de datos contenerizada"
+	docker exec -i "$containerized" sh -c "exec mysqldump -u $DB_USER -p\"$DB_PWD\" --no-create-info $dbName $canalesForMysqldump" > "$PATH_TO_FILES/$outputFileName.sql"
+    else
+        echo "Exportando datos desde una instancia de DB que corre directamente en el servidor"
+	/usr/bin/mysqldump -u "$DB_USER" --password="$DB_PWD" --no-create-info "$dbName" $canalesForMysqldump > "$PATH_TO_FILES/$outputFileName.sql"
+    fi
 fi
 
 
@@ -90,8 +106,6 @@ cd "$PATH_TO_FILES"
 echo "Comprimiendo el archivo $PATH_TO_FILES/$outputFileName.sql.tar.gz"
 /bin/tar -czvf "$PATH_TO_FILES/$outputFileName.sql.tar.gz" "$PATH_TO_FILES/$outputFileName.sql"
 /bin/chmod 777 "$PATH_TO_FILES/$outputFileName.sql.tar.gz"
-/bin/rm -f "$PATH_TO_WEB_FOLDER/$outputFileName.sql.tar.gz"
-/bin/mv "$PATH_TO_FILES/$outputFileName.sql.tar.gz" /var/www/html/
+/bin/mv "$PATH_TO_FILES/$outputFileName.sql.tar.gz" "$PATH_TO_WEB_FOLDER"
 /bin/chown -f siba:siba "$PATH_TO_WEB_FOLDER/$outPutFileName.sql.tar.gz"
-/bin/rm "$PATH_TO_FILES/$outputFileName.sql.tar.gz"
 /bin/rm "$PATH_TO_FILES/$outputFileName.sql"
