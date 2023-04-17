@@ -3,8 +3,9 @@
 #1. Parametros recibidos por la linea de comandos, definidos como opciones
 #
 #    -d -> DB Name
-#    -c -> Container DB Name
-#    -f -> How many files clean_db-$3.sql must the script iterates.
+#    -c -> (Containerized) It indicates whether mysql/mariadb is runing inside a container technology or not.
+#    -f -> How many files clean_db-$3.sql must the script iterates. (optional)
+#    -i -> Input file name, without extension file name (optional)
 
 
 #Importa los datos de configuracion del archivo .env
@@ -15,15 +16,17 @@ Definir las opciones y sus valores por defecto
 COMMENT
 # Definir las opciones y sus valores por defecto
 dbName=""
-containerDbName=""
 qtyCleanFiles=0
+containerized="0"
+inputFileName=""
 
 # Analizar las opciones de línea de comandos
-while getopts ":d:c:f:" opt; do
+while getopts ":d:c:f:i:" opt; do
   case $opt in
     d) dbName=$OPTARG;;
-    c) containerDbName=$OPTARG;;
+    c) containerized=$OPTARG;;
     f) qtyCleanFiles=$OPTARG;;
+    i) inputFileName=$OPTARG;;
     \?) echo "Opción inválida: -$OPTARG" >&2;;
     :) echo "La opción -$OPTARG requiere un argumento." >&2;;
   esac
@@ -31,23 +34,57 @@ done
 
 
 
+echo "Containerized: $containerized"
 
-rm -f "$PATH_TO_FILES/$dbName.sql.tar.gz"
-rm -f "$PATH_TO_FILES/home/siba/exports/$dbName.sql"
-echo "Recuperando el archivo SQL de la fuente $WEB_SOURCE/$dbName.sql.tar.gz"
-wget -O "$PATH_TO_FILES/$dbName.sql.tar.gz" "$WEB_SOURCE/$dbName.sql.tar.gz"
+if [[ -z $dbName ]]
+then
+    echo "No se ha definido el nombre de la base de datos, este valor es obligatorio"
+    exit
+fi
+
+
+if [[ -z $inputFileName ]]
+then
+    inputFileName="$dbName"
+fi
+
+
+
+rm -f "$PATH_TO_FILES/$inputFileName.sql.tar.gz"
+rm -f "$PATH_TO_FILES/$inputFileName.sql"
+echo "Recuperando el archivo SQL de la fuente $WEB_SOURCE/$inputFileName.sql.tar.gz"
+wget -O "$PATH_TO_FILES/$inputFileName.sql.tar.gz" "$WEB_SOURCE/$inputFileName.sql.tar.gz"
 pwd
 cd $PATH_TO_FILES
 pwd
-tar --directory "$PATH_TO_FILES/" -xvf "$PATH_TO_FILES/$dbName.sql.tar.gz"
+tar --directory "$PATH_TO_FILES/" -xvf "$PATH_TO_FILES/$inputFileName.sql.tar.gz"
 echo "$?"
 #docker exec -i std-totalplay /usr/bin/php /var/www/app/artisan down
 for ((i=1;i<=$qtyCleanFiles;i++ )); do
         echo "Printing forloop at $i"
-        docker exec -i "$containerDbName" sh -c "exec mysql -u $DB_USER -p\"$DB_PWD\" $dbName" < "/home/sibaops/scripts/cleandbscripts/$dbName/clean_db-$i.sql" # & > /dev/null
+        if [[ "$containerized" != '0' ]]
+        then
+            echo "Limpiando datos previos de la DB contenerizada"
+            docker exec -i "$containerized" sh -c "exec mysql -u $DB_USER -p\"$DB_PWD\" $dbName" < "$PATH_TO_FILES/cleandbscripts/$dbName/clean_db-$i.sql"
+        else
+            echo "Limpiando datos previos de la DB que corre directamente en el servidor"
+            mysql -u "$DB_USER" --password="$DB_PWD" "$dbName" < "$PATH_TO_FILES/cleandbscripts/$dbName/clean_db-$i.sql"
+        fi
         echo "$?"
 done
-chmod -Rf 777 "$PATH_TO_FILES/home/siba/exports/$dbName.sql"
-docker exec -i "$containerDbName" sh -c "exec mysql -u $DB_USER -p\"$DB_PWD\" $dbName" < "$PATH_TO_FILES/home/siba/exports/$dbName.sql"
+
+
+
+chmod -Rf 777 "$PATH_TO_FILES/$inputFileName.sql"
+#docker exec -i "$containerDbName" sh -c "exec mysql -u $DB_USER -p\"$DB_PWD\" $dbName" < "$PATH_TO_FILES/home/siba/exports/$dbName.sql"
+
+if [[ "$containerized" != '0' ]]
+then
+    echo "Limpiando datos previos de la DB contenerizada"
+    docker exec -i "$containerized" sh -c "exec mysql -u $DB_USER -p\"$DB_PWD\" $dbName" < "$PATH_TO_FILES/$inputFileName.sql"
+else
+    echo "Limpiando datos previos de la DB que corre directamente en el servidor"
+    mysql -u "$DB_USER" --password="$DB_PWD" "$dbName" < "$PATH_TO_FILES/$inputFileName.sql"
+fi
 ~                                                                                                                                                                                                      
 ~                                                                                                                                       

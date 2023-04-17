@@ -104,7 +104,7 @@ fi
 #Prepara el archivo a exportar
 cd "$PATH_TO_FILES"
 echo "Comprimiendo el archivo $PATH_TO_FILES/$outputFileName.sql.tar.gz"
-/bin/tar -czvf "$PATH_TO_FILES/$outputFileName.sql.tar.gz" "$PATH_TO_FILES/$outputFileName.sql"
+/bin/tar -czvf "$outputFileName.sql.tar.gz" -C "$PATH_TO_FILES" "$outputFileName.sql"
 /bin/chmod 777 "$PATH_TO_FILES/$outputFileName.sql.tar.gz"
 /bin/mv "$PATH_TO_FILES/$outputFileName.sql.tar.gz" "$PATH_TO_WEB_FOLDER"
 /bin/chown -f siba:siba "$PATH_TO_WEB_FOLDER/$outPutFileName.sql.tar.gz"

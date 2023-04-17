@@ -1,3 +1,5 @@
 .env
 /std-dev2/
 /std-dev2/*
+/cleandbscripts/
+/cleandbscripts/*
