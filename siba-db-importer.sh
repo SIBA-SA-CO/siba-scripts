@@ -57,28 +57,38 @@ fi
 
 
 
-rm -f "$PATH_TO_FILES/$inputFileName.sql.tar.gz"
-rm -f "$PATH_TO_FILES/$inputFileName.sql"
+
 
 if [[ "$sourceFile" == "local" ]]
 then
-    echo "Tomando el base de la carpeta: $PATH_TO_FILES"
+    echo "Tomando fuente la carpeta: $PATH_TO_FILES"
+    rm -f "$PATH_TO_FILES/$inputFileName.sql"
 else
     if [[ -z sourceFile ]]
     then
         #default behavior
         echo "Recuperando el archivo SQL de la fuente $WEB_SOURCE/$inputFileName.sql.tar.gz"
+        rm -f "$PATH_TO_FILES/$inputFileName.sql.tar.gz"
+        rm -f "$PATH_TO_FILES/$inputFileName.sql"
         wget -O "$PATH_TO_FILES/$inputFileName.sql.tar.gz" "$WEB_SOURCE/$inputFileName.sql.tar.gz"
     else
         httpRegexp="^http"
         if [[ $sourceFile =~ $httpRegexp ]]
         then
             echo "Recuperando el archivo SQL de la fuente $sourceFile/$inputFileName.sql.tar.gz"
+            rm -f "$PATH_TO_FILES/$inputFileName.sql.tar.gz"
+            rm -f "$PATH_TO_FILES/$inputFileName.sql"
             wget -O "$PATH_TO_FILES/$inputFileName.sql.tar.gz" "$sourceFile/$inputFileName.sql.tar.gz"    
         else
             if [[ "$PATH_TO_FILES" != "$sourceFile" ]]
             then
+                echo "Recuperando el archivo SQL de la fuente $sourceFile/$inputFileName.sql.tar.gz"
+                rm -f "$PATH_TO_FILES/$inputFileName.sql.tar.gz"
+                rm -f "$PATH_TO_FILES/$inputFileName.sql"
                 cp "$sourceFile/$inputFileName.sql.tar.gz" "$PATH_TO_FILES/$inputFileName.sql.tar.gz"
+            else
+                echo "Tomando como fuente la carpeta: $sourceFile"
+                rm -f "$PATH_TO_FILES/$inputFileName.sql"
             fi    
         fi 
     fi
