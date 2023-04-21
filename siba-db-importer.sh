@@ -70,7 +70,7 @@ else
         echo "Recuperando el archivo SQL de la fuente $WEB_SOURCE/$inputFileName.sql.tar.gz"
         wget -O "$PATH_TO_FILES/$inputFileName.sql.tar.gz" "$WEB_SOURCE/$inputFileName.sql.tar.gz"
     else
-        httpRegexp = "^http"
+        httpRegexp="^http"
         if [[ $sourceFile =~ $httpRegexp ]]
         then
             echo "Recuperando el archivo SQL de la fuente $sourceFile/$inputFileName.sql.tar.gz"
