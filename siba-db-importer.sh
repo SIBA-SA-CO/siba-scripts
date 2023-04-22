@@ -64,7 +64,7 @@ then
     echo "Tomando fuente la carpeta: $PATH_TO_FILES"
     rm -f "$PATH_TO_FILES/$inputFileName.sql"
 else
-    if [[ -z sourceFile ]]
+    if [[ "$sourceFile" == "" ]]
     then
         #default behavior
         echo "Recuperando el archivo SQL de la fuente $WEB_SOURCE/$inputFileName.sql.tar.gz"
