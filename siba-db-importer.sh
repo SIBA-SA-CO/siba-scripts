@@ -14,7 +14,10 @@
 
 
 #Importa los datos de configuracion del archivo .env
-source .env
+SCRIPT_PATH="${BASH_SOURCE:-$0}"
+ABS_SCRIPT_PATH="$(realpath "${SCRIPT_PATH}")"
+ABS_DIRECTORY="$(dirname "${ABS_SCRIPT_PATH}")"
+source "${ABS_DIRECTORY}/.env"
 
 : << 'COMMENT'
 Definir las opciones y sus valores por defecto

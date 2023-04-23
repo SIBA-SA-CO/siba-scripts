@@ -8,8 +8,11 @@
 #    -c -> (Containerized) It indicates whether mysql/mariadb is runing inside a container technology or not.
 
 #Loads param variables
-source .env
 
+SCRIPT_PATH="${BASH_SOURCE:-$0}"
+ABS_SCRIPT_PATH="$(realpath "${SCRIPT_PATH}")"
+ABS_DIRECTORY="$(dirname "${ABS_SCRIPT_PATH}")"
+source "${ABS_DIRECTORY}/.env"
 
 # Define funciones
 # ===========================================================
