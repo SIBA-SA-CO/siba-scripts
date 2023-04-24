@@ -1,4 +1,5 @@
 #!/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/usr/kerberos/sbin:/usr/kerberos/bin
 #
 #1. Parametros recibidos por la linea de comandos, definidos como opciones
 #
