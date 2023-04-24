@@ -1,6 +1,4 @@
 #!/bin/bash
-PATH=
-export PATH
 #
 #1. Parametros recibidos por la linea de comandos
 #
@@ -8,6 +6,11 @@ export PATH
 #    -o -> Output file name, without extension file name (optional)
 #    -t -> (Tables) Comma separated string of table names to export to, if not defined, it's going to export all DB's tables. (optional)
 #    -c -> (Containerized) It indicates whether mysql/mariadb is runing inside a container technology or not.
+
+
+
+[-- REPLACE POR FULL TOOL PATH --]echo '>>>>> BEGIN'
+
 
 #Defines local variables
 
@@ -36,7 +39,7 @@ function convertir_comas_a_espacios() {
     nueva_cadena="${cadena//,/ }"
 
     # Imprimir la nueva cadena
-    echo "$nueva_cadena"
+    [-- REPLACE POR FULL TOOL PATH --]echo "$nueva_cadena"
 }
 
 
@@ -53,13 +56,14 @@ while getopts ":d:o:t:c:" opt; do
     o) outputFileName=$OPTARG;;
     t) tablesToExport=$OPTARG;;
     c) containerized=$OPTARG;;
-    \?) echo "Opción inválida: -$OPTARG" >&2;;
-    :) echo "La opción -$OPTARG requiere un argumento." >&2;;
+    \?) [-- REPLACE POR FULL TOOL PATH --]echo "Opción inválida: -$OPTARG" >&2;;
+    :) [-- REPLACE POR FULL TOOL PATH --]echo "La opción -$OPTARG requiere un argumento." >&2;;
   esac
 done
 
 
-echo "Containerized: $containerized"
+
+[-- REPLACE POR FULL TOOL PATH --]echo "Containerized: $containerized"
 
 if [[ -z $dbName ]]
 then
@@ -73,13 +77,13 @@ then
     outputFileName="$dbName"
 fi
 
-echo "Iniciando el proceso"
+[-- REPLACE POR FULL TOOL PATH --]echo "Iniciando el proceso"
 
 #Borra los archivos procesados anteriormente (de existir)
-echo "Borrando los archivos iniciales"
-rm -f "$PATH_TO_FILES/$outputFileName.sql"
-rm -f "$PATH_TO_FILES/$outputFileName.sql.tar.gz"
-rm -f "$PATH_TO_WEB_FOLDER/$outputFileName.sql.tar.gz"
+[-- REPLACE POR FULL TOOL PATH --]echo "Borrando los archivos iniciales"
+[-- REPLACE POR FULL TOOL PATH --]rm -f "$PATH_TO_FILES/$outputFileName.sql"
+[-- REPLACE POR FULL TOOL PATH --]rm -f "$PATH_TO_FILES/$outputFileName.sql.tar.gz"
+[-- REPLACE POR FULL TOOL PATH --]rm -f "$PATH_TO_WEB_FOLDER/$outputFileName.sql.tar.gz"
 
 #Exporta los datos desde Mysql
 echo "Iniciando la exportación de datos mysql"
@@ -88,30 +92,32 @@ if [[ "$tablesToExport" == "All"  ]]
 then
     if [[ "$containerized" != '0' ]]
     then
-        echo "Exportando desde una base de datos contenerizada"
-	docker exec -i "$containerized" sh -c "exec mysqldump -u $DB_USER -p\"$DB_PWD\" $dbName" > "$PATH_TO_FILES/$outputFileName.sql"
+        [-- REPLACE POR FULL TOOL PATH --]echo "Exportando desde una base de datos contenerizada"
+        [-- REPLACE POR FULL TOOL PATH --]docker exec -i "$containerized" sh -c "exec mysqldump -u $DB_USER -p\"$DB_PWD\" $dbName" > "$PATH_TO_FILES/$outputFileName.sql"
     else
-        echo "Exportando datos desde una instancia de DB que corre directamente en el servidor"
-        mysqldump -u "$DB_USER" --password="$DB_PWD" "$dbName" > "$PATH_TO_FILES/$outputFileName.sql"
+        [-- REPLACE POR FULL TOOL PATH --]echo "Exportando datos desde una instancia de DB que corre directamente en el servidor"
+        [-- REPLACE POR FULL TOOL PATH --]mysqldump -u "$DB_USER" --password="$DB_PWD" "$dbName" > "$PATH_TO_FILES/$outputFileName.sql"
     fi
 else
     canalesForMysqldump=$(convertir_comas_a_espacios "$tablesToExport")
     if [[ "$containerized" != '0' ]]
     then
-        echo "Exportando desde una base de datos contenerizada"
-	docker exec -i "$containerized" sh -c "exec mysqldump -u $DB_USER -p\"$DB_PWD\" --no-create-info $dbName $canalesForMysqldump" > "$PATH_TO_FILES/$outputFileName.sql"
+        [-- REPLACE POR FULL TOOL PATH --]echo "Exportando desde una base de datos contenerizada"
+        [-- REPLACE POR FULL TOOL PATH --]docker exec -i "$containerized" sh -c "exec mysqldump -u $DB_USER -p\"$DB_PWD\" --no-create-info $dbName $canalesForMysqldump" > "$PATH_TO_FILES/$outputFileName.sql"
     else
-        echo "Exportando datos desde una instancia de DB que corre directamente en el servidor"
-	mysqldump -u "$DB_USER" --password="$DB_PWD" --no-create-info "$dbName" $canalesForMysqldump > "$PATH_TO_FILES/$outputFileName.sql"
+        [-- REPLACE POR FULL TOOL PATH --]echo "Exportando datos desde una instancia de DB que corre directamente en el servidor"
+        [-- REPLACE POR FULL TOOL PATH --]mysqldump -u "$DB_USER" --password="$DB_PWD" --no-create-info "$dbName" $canalesForMysqldump > "$PATH_TO_FILES/$outputFileName.sql"
     fi
 fi
 
 
 #Prepara el archivo a exportar
 cd "$PATH_TO_FILES"
-echo "Comprimiendo el archivo $PATH_TO_FILES/$outputFileName.sql.tar.gz"
-tar -czvf "$outputFileName.sql.tar.gz" -C "$PATH_TO_FILES" "$outputFileName.sql"
-chmod 777 "$PATH_TO_FILES/$outputFileName.sql.tar.gz"
-mv "$PATH_TO_FILES/$outputFileName.sql.tar.gz" "$PATH_TO_WEB_FOLDER"
-chown -f siba:siba "$PATH_TO_WEB_FOLDER/$outPutFileName.sql.tar.gz"
-rm "$PATH_TO_FILES/$outputFileName.sql"
+[-- REPLACE POR FULL TOOL PATH --]echo "Comprimiendo el archivo $PATH_TO_FILES/$outputFileName.sql.tar.gz"
+[-- REPLACE POR FULL TOOL PATH --]tar -czvf "$outputFileName.sql.tar.gz" -C "$PATH_TO_FILES" "$outputFileName.sql"
+[-- REPLACE POR FULL TOOL PATH --]chmod 777 "$PATH_TO_FILES/$outputFileName.sql.tar.gz"
+[-- REPLACE POR FULL TOOL PATH --]mv "$PATH_TO_FILES/$outputFileName.sql.tar.gz" "$PATH_TO_WEB_FOLDER"
+[-- REPLACE POR FULL TOOL PATH --]rm "$PATH_TO_FILES/$outputFileName.sql"
+
+[-- REPLACE POR FULL TOOL PATH --]echo '<<<<< END'
+[-- REPLACE POR FULL TOOL PATH --]echo ' '
