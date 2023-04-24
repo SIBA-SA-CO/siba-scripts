@@ -1,5 +1,6 @@
 #!/bin/bash
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/usr/kerberos/sbin:/usr/kerberos/bin"
+PATH=
+export PATH
 #
 #1. Parametros recibidos por la linea de comandos, definidos como opciones
 #
@@ -14,11 +15,12 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/g
 #           - File system resource (path to another local directory)
 
 
-#Importa los datos de configuracion del archivo .env
-SCRIPT_PATH="${BASH_SOURCE:-$0}"
-ABS_SCRIPT_PATH="$(realpath "${SCRIPT_PATH}")"
-ABS_DIRECTORY="$(dirname "${ABS_SCRIPT_PATH}")"
-source "${ABS_DIRECTORY}/.env"
+DB_USER=
+DB_PWD=
+PATH_TO_FILES=
+PATH_TO_WEB_FOLDER=
+WEB_SOURCE=
+
 
 : << 'COMMENT'
 Definir las opciones y sus valores por defecto

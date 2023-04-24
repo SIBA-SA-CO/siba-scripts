@@ -1,4 +1,5 @@
 .env
+*.sh
 /std-dev2/
 /std-dev2/*
 /cleandbscripts/
