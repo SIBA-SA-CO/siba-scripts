@@ -1,0 +1,60 @@
+#!/bin/bash
+#
+#1. Parametros recibidos por la linea de comandos
+#
+#    -o -> Carpeta de origen
+#    -f -> Carpeta failed (Carpeta de destino para los archivos .error y .failed)
+#    -l -> Carpeta loaded (Carpeta de destino para los archivos .success)
+
+
+echo '>>>>> BEGIN'
+
+
+# Definir las opciones y sus valores por defecto
+carpeta_origen=""
+carpeta_failed=""
+carpeta_loaded=""
+
+# Analizar las opciones de línea de comandos
+while getopts ":o:f:l:" opt; do
+  case $opt in
+    o) carpeta_origen=$OPTARG;;
+    f) carpeta_failed=$OPTARG;;
+    l) carpeta_loaded=$OPTARG;;
+    \?) echo "Opción inválida: -$OPTARG" >&2;;
+    :) echo "La opción -$OPTARG requiere un argumento." >&2;;
+  esac
+done
+
+# Validar parámetros obligatorios
+if [ -z "$carpeta_origen" ] || [ -z "$carpeta_failed" ] || [ -z "$carpeta_loaded" ]; then
+  echo "Error: Debes especificar todos los parámetros obligatorios."
+  exit 1
+fi
+
+# Carpeta de origen de los archivos
+echo "Carpeta Origen: $carpeta_origen"
+
+# Carpeta de destino para los archivos .error y .failed
+echo "Carpeta Failed: $carpeta_failed"
+
+# Carpeta de destino para los archivos .success
+echo "Carpeta Loaded: $carpeta_loaded"
+
+# Crear la carpeta "Failed" si no existe
+mkdir -p "$carpeta_failed"
+
+# Crear la carpeta "Loaded" si no existe
+mkdir -p "$carpeta_loaded"
+
+# Mover archivos .error y .failed a la carpeta "Failed"
+if ! find "$carpeta_origen" -type f \( -name "*.error" -o -name "*.failed" \) -exec mv {} "$carpeta_failed" \; ; then
+  echo "Error al mover archivos .error y .failed a la carpeta Failed. Código de salida: $?"
+fi
+
+# Mover archivos .success a la carpeta "Loaded"
+if ! find "$carpeta_origen" -type f -name "*.success" -exec mv {} "$carpeta_loaded" \; ; then
+  echo "Error al mover archivos .success a la carpeta Loaded. Código de salida: $?"
+fi
+
+echo '>>>>> END'
