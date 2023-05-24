@@ -42,10 +42,25 @@ echo "Carpeta Failed: $carpeta_failed"
 echo "Carpeta Loaded: $carpeta_loaded"
 
 # Crear la carpeta "Failed" si no existe
-mkdir -p "$carpeta_failed"
+if [ -d "$carpeta_failed" ];
+then
+    echo "$carpeta_failed directory exists."
+else
+  echo "$carpeta_failed directory does not exist."
+  mkdir -p "$carpeta_failed"
+fi
+
 
 # Crear la carpeta "Loaded" si no existe
-mkdir -p "$carpeta_loaded"
+if [ -d "$carpeta_loaded" ];
+then
+    echo "$carpeta_loaded directory exists."
+else
+  echo "$carpeta_loaded directory does not exist."
+  mkdir -p "$carpeta_loaded"
+fi
+
+
 
 # Mover archivos .error y .failed a la carpeta "Failed"
 if ! find "$carpeta_origen" -type f \( -name "*.error" -o -name "*.failed" \) -exec mv {} "$carpeta_failed" \; ; then
