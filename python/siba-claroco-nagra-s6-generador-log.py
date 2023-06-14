@@ -3,6 +3,7 @@
 import os
 import time
 import sys
+import re
 
 folder_path = sys.argv[1]
 output_file = sys.argv[2]
@@ -36,15 +37,42 @@ with open(output_file, 'w') as outfile:
 
     # Iterar sobre los archivos .errorlog
     for file_name in errorlog_files:
+
         file_path = os.path.join(folder_path, file_name)
-        
-        # Obtener la fecha de modificación del archivo
-        file_timestamp = os.path.getmtime(file_path)
-        # Convertir la fecha de tiempo en una cadena legible
-        file_date = time.ctime(file_timestamp)
-        
-        # Verificar si el registro ya existe en los registros existentes
-        if file_date + ' ' + cliente + ' ' + file_name not in existing_logs:
-            # Escribir la fecha y el nombre del archivo en el archivo de salida
-            outfile.write(file_date + ' ' + cliente + ' ' + file_name)
-            outfile.write('\n')
+        error_content = ''
+        channelId = ''
+
+        if(extension == ".errorlog" or extension == ".error"):
+            # Obtener el error
+            with open(file_path, 'r') as error_file:
+                error_content = error_file.read().replace('\n', ' ')
+
+            # Obtener la fecha de modificación del archivo
+            file_timestamp = os.path.getmtime(file_path)
+            # Convertir la fecha de tiempo en una cadena legible
+            file_date = time.ctime(file_timestamp)
+            
+            registro = file_date + ' ' + cliente + ' ' + file_name + ' ' + error_content
+            # Verificar si el registro ya existe en los registros existentes
+            if registro.strip() not in existing_logs:
+                # Escribir la fecha y el nombre del archivo en el archivo de salida
+                outfile.write(file_date + ' ' + cliente + ' ' + file_name + ' ' + error_content)
+                outfile.write('\n')
+
+        elif(extension == ".failed"):
+            # Obtiene el ChannelId 
+            with open(file_path, 'r') as channelId_file:
+                chanelid_content = channelId_file.read()
+            channelId = re.search(r'<ChannelId>(.*?)</ChannelId>', chanelid_content).group(1)
+            
+            # Obtener la fecha de modificación del archivo
+            file_timestamp = os.path.getmtime(file_path)
+            # Convertir la fecha de tiempo en una cadena legible
+            file_date = time.ctime(file_timestamp)
+            
+            registro = file_date + ' ' + cliente + ' ' + file_name + ': ' + channelId
+            # Verificar si el registro ya existe en los registros existentes
+            if registro.strip() not in existing_logs:
+                # Escribir la fecha y el nombre del archivo en el archivo de salida
+                outfile.write(file_date + ' ' + cliente + ' ' + file_name + ': ' + channelId)
+                outfile.write('\n')
