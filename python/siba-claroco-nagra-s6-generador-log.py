@@ -45,7 +45,7 @@ with open(output_file, 'w') as outfile:
         if(extension == ".errorlog" or extension == ".error"):
             # Obtener el error
             with open(file_path, 'r') as error_file:
-                error_content = error_file.read().replace('\n', ' ')
+                error_content = error_file.read().replace('\n', ' ').replace("'", '"')
 
             # Obtener la fecha de modificación del archivo
             file_timestamp = os.path.getmtime(file_path)
