@@ -1,0 +1,7 @@
+#!/bin/bash
+
+#1. Levanta keychain para gestión llaves privadas
+/path/to/keychain --agents ssh --eval /path/to/ssh-private-key
+
+#2. Sincroniza los archivos con el repositorio de keycdn.com
+/path/to/rsync -rtz -v --chmod=D2755,F644 /path/to/local/cdn-directory/ [key-cdn-user]]@rsync.keycdn.com:[key-cdn-push-zone]/
