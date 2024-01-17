@@ -1,0 +1,106 @@
+#!/bin/bash
+
+# Función que procesa el parámetro de fecha
+procesar_parametro_fecha() {
+    local parametro=$1
+    local fecha_base=$2
+
+    # Verificar si el parámetro tiene el formato +Xdays o -Ymonth
+    if [[ $parametro =~ ^([+-])([0-9]+)(days|months|now)$ ]]; then
+        operador=${BASH_REMATCH[1]}
+        cantidad=${BASH_REMATCH[2]}
+        unidad=${BASH_REMATCH[3]}
+
+        if [ "$unidad" == "days" ]; then
+            fecha_base=${fecha_base:-$(date +%Y-%m-%d)}
+            nueva_fecha=$(date -d "$fecha_base $operador$cantidad days" +%Y-%m-%d)
+            echo $nueva_fecha
+        elif [ "$unidad" == "months" ]; then
+            fecha_base=${fecha_base:-$(date +%Y-%m-%d)}
+            nueva_fecha=$(date -d "$fecha_base $operador$cantidad months" +%Y-%m-%d)
+            echo $nueva_fecha
+        elif [ "$unidad" == "now" ]; then
+            nueva_fecha=${fecha_base:-$(date +%Y-%m-%d)}
+            echo $nueva_fecha
+        else
+            echo "Unidad no válida: $unidad"
+            exit 1
+        fi
+    elif [[ $parametro =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        echo $parametro
+    else
+        echo "Formato de fecha no válido: $parametro"
+        exit 1
+    fi
+}
+
+# Verificar que se proporcionen los parámetros requeridos
+if [ "$#" -lt 2 ]; then
+    echo "Uso: $0 <comando_laravel> <id_cliente> <fecha_inicial> <fecha_final> <id_canales> [<id_canales_excluir>]"
+    exit 1
+fi
+
+# Asignar los parámetros a variables
+comando_laravel="$1"    #Parámetro obligatorio
+id_cliente="$2"         #Parámetro obligatorio
+
+
+fecha_inicial="$3"
+if [ -z "$fecha_inicial" ]; then
+    fecha_inicial=$(date +%Y-%m-%d)
+fi
+fecha_inicial=$(procesar_parametro_fecha "$fecha_inicial")
+
+
+fecha_final="$4"
+if [ -z "$fecha_final" ]; then
+    fecha_final=$(procesar_parametro_fecha '+60days' "$fecha_inicial")
+else
+    fecha_final=$(procesar_parametro_fecha "$fecha_final" "$fecha_inicial")
+fi
+
+
+id_canales="$5"
+# Validar id_canales
+if [[ ! $id_canales =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    echo "Formato no válido para --canales. Debe ser una cadena de números separados por comas únicamente."
+    exit 1
+fi
+
+# Validar id_canales_excluir
+if [ -n "$id_canales_excluir" ] && [[ ! $id_canales_excluir =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    echo "Formato no válido para --canales-excluidos. Debe ser una cadena de números separados por comas únicamente."
+    exit 1
+fi
+id_canales_excluir="$6"
+
+
+
+# Procesar las fechas utilizando la función
+
+
+
+# Construir el comando PHP con los parámetros
+comando_php="php $comando_laravel prd $id_cliente $fecha_inicial"
+
+# Agregar fecha final si se proporciona
+if [ -n "$fecha_final" ]; then
+    comando_php="$comando_php $fecha_final"
+fi
+
+# Agregar ID de canales
+if [ -n "$id_canales" ]; then
+    comando_php="$comando_php --canales=$id_canales"
+fi
+
+
+# Agregar ID de canales a excluir si se proporciona
+if [ -n "$id_canales_excluir" ]; then
+    comando_php="$comando_php --canales-excluidos=$id_canales_excluir"
+fi
+
+# Ejecutar el script PHP con los parámetros
+#echo "$comando_php"
+#$comando_php
+echo "Ejecuntando el comando: /usr/bin/docker exec -i [nombre_container] sh -c \"$comando_php\""
+/usr/bin/docker exec -i [nombre_container] sh -c "$comando_php"
