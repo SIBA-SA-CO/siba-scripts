@@ -62,7 +62,7 @@ fi
 
 id_canales="$5"
 # Validar id_canales
-if [[ ! $id_canales =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+if [ -n "$id_canales" ] && [[ ! $id_canales =~ ^[0-9]+(,[0-9]+)*$ ]]; then
     echo "Formato no válido para --canales. Debe ser una cadena de números separados por comas únicamente."
     exit 1
 fi
