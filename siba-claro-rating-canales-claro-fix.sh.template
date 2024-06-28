@@ -1,0 +1,37 @@
+#!/bin/bash
+
+########################################################
+# Descripción:
+# Este script despacha los archivos extemporáneos para
+# los canales RED+ e INFOCLARO, plataformas Nagra HFC y
+# OPF3, solicitado por el equipo técnico de Nagra, para
+# darle solución a un problema de mediciones de rating
+# erradas durante el mes de Junio de 2024.
+# 
+# Esta solución se supone temporal, por lo que debe ser 
+# retirada una vez sea notificada por los equipo invo-
+# lucrados (Nagra y Claro) 
+#
+# Creado por: @maomuriel
+# Fecha: 2024-06-28
+#
+#########################################################
+
+# Calcular la fecha de inicio (fecha actual)
+start_date=$(date +"%Y-%m-%d")
+
+# Calcular la fecha de cierre (7 días después de la fecha de inicio)
+end_date=$(date -d "$start_date + 7 days" +"%Y-%m-%d")
+
+# Comando 1
+command1="php /home/mma/scriptco.php prd [id_cliente] $start_date $end_date nagra [ids_canales]"
+
+# Comando 2
+command2="php /home/mma/scriptand.php prd [id_cliente] $start_date $end_date nagra [ids_canales]"
+
+# Ejecutar los comandos
+echo "Ejecutando comando 1: $command1"
+eval $command1
+
+echo "Ejecutando comando 2: $command2"
+eval $command2
