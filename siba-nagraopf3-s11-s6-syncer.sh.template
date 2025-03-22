@@ -9,12 +9,12 @@ remote_p=""
 nagra_usr=""
 
 # Paso 1: Enviar archivos .xml desde s1 a s2
-/usr/bin/flock -n /tmp/rsync_s6-nagrahfc.lock -c '/usr/bin/sshpass -p "'$remote_p'" rsync -vvar --remove-source-files --no-perms --no-owner --no-group '$local_base_path'ToLoad/ '$remote_u'@'$remote_server':'$remote_base_path'ToLoad/'
+/usr/bin/flock -n /tmp/rsync_s6-nagraopf3.lock -c '/usr/bin/sshpass -p "'$remote_p'" rsync -vvar --remove-source-files --no-perms --no-owner --no-group '$local_base_path'ToLoad/ '$remote_u'@'$remote_server':'$remote_base_path'ToLoad/'
 /usr/bin/sshpass -p "$remote_p" ssh "$remote_u@$remote_server" "chown -R $nagra_usr:$nagra_usr $remote_base_path"
 
-/usr/bin/flock -n /tmp/rsync_s6-nagrahfc.lock -c '/usr/bin/sshpass -p "'$remote_p'" rsync -vvar --remove-source-files --no-perms --no-owner --no-group '$local_base_path'staging/ToLoad/ '$remote_u'@'$remote_server':'$remote_base_path'staging/ToLoad/'
+/usr/bin/flock -n /tmp/rsync_s6-nagraopf3.lock -c '/usr/bin/sshpass -p "'$remote_p'" rsync -vvar --remove-source-files --no-perms --no-owner --no-group '$local_base_path'staging/ToLoad/ '$remote_u'@'$remote_server':'$remote_base_path'staging/ToLoad/'
 /usr/bin/sshpass -p "$remote_p" ssh "$remote_u@$remote_server" "chown -R $nagra_usr:$nagra_usr $remote_base_path""triara/ToLoad/"
 
 # Paso 2: Sincronizar todas las carpetas desde s2 a s1
-/usr/bin/flock -n /tmp/rsync_s6-nagrahfc.lock -c '/usr/bin/sshpass -p "'$remote_p'" rsync -vvar --no-perms --no-owner --no-group '$remote_u'@'$remote_server':'$remote_base_path'Loaded/ '$local_base_path'Loaded/'
-/usr/bin/flock -n /tmp/rsync_s6-nagrahfc.lock -c '/usr/bin/sshpass -p "'$remote_p'" rsync -vvar --no-perms --no-owner --no-group '$remote_u'@'$remote_server':'$remote_base_path'Failed/ '$local_base_path'Failed/'
+/usr/bin/flock -n /tmp/rsync_s6-nagraopf3.lock -c '/usr/bin/sshpass -p "'$remote_p'" rsync -vvar --no-perms --no-owner --no-group '$remote_u'@'$remote_server':'$remote_base_path'Loaded/ '$local_base_path'Loaded/'
+/usr/bin/flock -n /tmp/rsync_s6-nagraopf3.lock -c '/usr/bin/sshpass -p "'$remote_p'" rsync -vvar --no-perms --no-owner --no-group '$remote_u'@'$remote_server':'$remote_base_path'Failed/ '$local_base_path'Failed/'
