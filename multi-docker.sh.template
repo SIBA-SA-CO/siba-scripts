@@ -1,0 +1,31 @@
+#!/bin/bash
+
+# Verifica si hay al menos un parámetro
+if [ "$#" -lt 1 ]; then
+  echo "Uso: $0 <comando_docker> <ruta1> <ruta2> ..."
+  echo "Ejemplo: $0 'docker compose ps' /ruta/proyecto1 /ruta/proyecto2"
+  exit 1
+fi
+
+# El primer parámetro es el comando Docker que se desea ejecutar
+comando="$1"
+shift  # Elimina el primer parámetro para dejar solo las rutas
+
+# Verifica si quedaron rutas
+if [ "$#" -eq 0 ]; then
+  echo "Error: debes indicar al menos una ruta después del comando."
+  exit 1
+fi
+
+# Itera sobre las rutas
+for ruta in "$@"; do
+  if [ -f "$ruta/docker-compose.yml" ]; then
+    echo "➡ Ejecutando comando en: $ruta"
+    (
+      cd "$ruta" || exit
+      eval "$comando"
+    )
+  else
+    echo "⚠ Archivo docker-compose.yml no encontrado en: $ruta"
+  fi
+done

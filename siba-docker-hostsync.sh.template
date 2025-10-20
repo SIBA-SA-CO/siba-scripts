@@ -1,0 +1,82 @@
+#!/bin/bash
+
+
+if [ "$#" -lt 2 ]; then
+  echo "Uso: $0 map <ruta1> <ruta2> ..."
+  exit 1
+fi
+
+comando="$1"
+shift
+
+if [[ "$comando" != "map" ]]; then
+  echo "Solo está disponible el comando 'map' en este modo."
+  exit 1
+fi
+
+# =============================
+# MODO MAP (inyectar en contenedores)
+# =============================
+
+temp_file=$(mktemp)
+echo "# >>> SIBA-CONTAINERS-START" >> "$temp_file"
+
+for ruta in "$@"; do
+  if [ -f "$ruta/docker-compose.yml" ]; then
+    echo "# Proyecto: $ruta" >> "$temp_file"
+    (
+      cd "$ruta" || exit
+
+      # Esperar contenedores activos
+      for i in {1..3}; do
+        containers=$(docker compose ps -q)
+        if [ -n "$containers" ]; then
+          break
+        else
+          echo "⏳ Esperando contenedores en $ruta... ($i/3)"
+          sleep 4
+        fi
+      done
+
+      if [ -z "$containers" ]; then
+        echo "# ⚠ No se encontraron contenedores activos en $ruta" >> "$temp_file"
+      else
+        echo "$containers" | while read -r container_id; do
+          # Obtener nombre y limpiar hash inicial si existe (ej: 6b6805b5a8fd_std-db → std-db)
+          raw_name=$(docker inspect -f '{{.Name}}' "$container_id" | sed 's|^/||')
+          ip=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{if $v.IPAddress}}{{printf "%s" $v.IPAddress}}{{break}}{{end}}{{end}}' "$container_id")
+
+          if [ -n "$ip" ]; then
+            echo "$ip    ${raw_name}" >> "$temp_file"
+          fi
+        done
+      fi
+    )
+    echo "" >> "$temp_file"
+  else
+    echo "⚠ docker-compose.yml no encontrado en: $ruta"
+  fi
+done
+
+echo "# <<< SIBA-CONTAINERS-END" >> "$temp_file"
+
+# =============================
+# INYECTAR EN /etc/hosts DE CADA CONTENEDOR
+# =============================
+echo "📦 Inyectando mapeo dentro de los contenedores..."
+cat "$temp_file" > /tmp/hosts_siba
+
+for container in $(docker ps -q); do
+  cname=$(docker inspect -f '{{.Name}}' "$container")
+  echo "  ➜ Procesando $cname ..."
+  docker cp /tmp/hosts_siba "$container":/etc/hosts_siba >/dev/null 2>&1
+  docker exec -u 0 "$container" sh -c "cat /etc/hosts_siba >> /etc/hosts" >/dev/null 2>&1
+  if [ $? -eq 0 ]; then
+    echo "    ✅ Mapeo inyectado correctamente en /etc/hosts"
+  else
+    echo "    ⚠ No se pudo inyectar el mapeo (verificar permisos del contenedor)"
+  fi
+done
+
+rm -f "$temp_file" /tmp/hosts_siba
+echo "✅ Todos los contenedores activos fueron actualizados."
