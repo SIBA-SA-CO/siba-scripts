@@ -1,0 +1,373 @@
+#!/bin/bash
+
+# =============================
+# FUNCIÓN DE AYUDA
+# =============================
+show_help() {
+  cat << EOF
+Uso: $0 [OPCIONES] map <RUTA_PROYECTO1> [RUTA_PROYECTO2] ...
+
+DESCRIPCIÓN:
+  Automatiza la inyección de entradas DNS en los archivos /etc/hosts de 
+  contenedores Docker para facilitar la resolución de nombres entre contenedores
+  de diferentes proyectos Docker Compose.
+
+MODOS DE OPERACIÓN:
+  map    Mapea contenedores de proyectos Docker Compose e inyecta las 
+         entradas en /etc/hosts de todos los contenedores activos
+
+PARÁMETROS:
+  <RUTA_PROYECTO>   Ruta(s) al directorio que contiene docker-compose.yml
+                    Pueden especificarse múltiples rutas separadas por espacio
+
+OPCIONES:
+  -h, --help        Muestra esta ayuda y sale
+  -v, --version     Muestra la versión del script
+  --reset           Elimina todos los mapeos previamente inyectados por este script
+                    en los archivos /etc/hosts de los contenedores
+  --map-fqdn-to-container=FQDN,CONTENEDOR
+                    Mapea un FQDN a la IP de un contenedor específico.
+                    El FQDN se inyectará en todos los contenedores excepto en el origen.
+                    Ejemplo: --map-fqdn-to-container=api.midominio.com,app-container
+  --no-local-map    Desactiva el mapeo automático de IPs a nombres de contenedores.
+                    Solo aplica los mapeos FQDN definidos con --map-fqdn-to-container.
+
+EJEMPLOS DE USO:
+  # Eliminar mapeos anteriores
+  $0 --reset
+
+  # Mapeo tradicional (comportamiento original)
+  $0 map /ruta/proyecto1 /ruta/proyecto2
+
+  # Solo mapeos FQDN personalizados
+  $0 map /proyecto1 --no-local-map --map-fqdn-to-container=api.midominio.com,backend
+
+  # Múltiples mapeos FQDN sin mapeo local
+  $0 map /proyecto1 /proyecto2 --no-local-map \
+    --map-fqdn-to-container=api.midominio.com,app-server \
+    --map-fqdn-to-container=db.midominio.com,database
+
+  # Combinación de mapeo local y FQDN
+  $0 map /home/usuario/proyectos/* \
+    --map-fqdn-to-container=web.midominio.com,frontend
+
+FUNCIONALIDAD:
+  1. Busca docker-compose.yml en las rutas especificadas
+  2. Detecta contenedores activos en cada proyecto
+  3. Genera mapeo IP-Nombre de todos los contenedores (a menos que se use --no-local-map)
+  4. Inyecta el mapeo en /etc/hosts de cada contenedor activo
+  5. Permite resolución de nombres entre contenedores de diferentes proyectos
+  6. Opcionalmente mapea FQDNs a contenedores específicos
+  7. Puede eliminar mapeos anteriores con --reset
+
+NOTAS:
+  - Requiere permisos de ejecución Docker en el host
+  - Los contenedores deben estar en estado 'running'
+  - Los cambios no persisten después de reiniciar contenedores
+  - Compatible con Docker Compose v2+
+
+EOF
+}
+
+# =============================
+# FUNCIÓN DE VERSIÓN
+# =============================
+show_version() {
+  echo "siba-containers-map v1.3.0"
+  echo "Herramienta de mapeo DNS para contenedores Docker"
+  echo "Licencia: MIT"
+}
+
+# =============================
+# FUNCIÓN RESET
+# =============================
+reset_mappings() {
+  echo "🔄 Iniciando limpieza de mapeos anteriores..."
+  cleaned_count=0
+  error_count=0
+  
+  for container in $(docker ps -q 2>/dev/null); do
+    # Usar mismo método de nombres que en el mapeo principal
+    service_name=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$container" 2>/dev/null)
+    if [ -z "$service_name" ]; then
+      service_name=$(docker inspect -f '{{.Name}}' "$container" 2>/dev/null | sed 's|^/||' | sed 's/^[^_]*_//')
+    fi
+    
+    # Verificar si el contenedor tiene mapeos SIBA
+    if docker exec -u 0 "$container" sh -c "grep -q 'SIBA-CONTAINERS' /etc/hosts" 2>/dev/null; then
+      echo "  🧹 Limpiando mapeos en $service_name ..."
+      
+      # Crear archivo temporal en el host
+      temp_file=$(mktemp)
+      # Obtener hosts actual y eliminar secciones SIBA
+      docker exec -u 0 "$container" sh -c "cat /etc/hosts" 2>/dev/null | \
+        sed '/# >>> SIBA-CONTAINERS-START/,/# <<< SIBA-CONTAINERS-END/d' > "$temp_file"
+      
+      # Copiar archivo modificado al contenedor
+      docker exec -u 0 -i "$container" sh -c 'cat > /etc/hosts' < "$temp_file"
+      
+      if [ $? -eq 0 ]; then
+        echo "    ✅ Mapeos eliminados de $service_name"
+        ((cleaned_count++))
+      else
+        echo "    ⚠ No se pudieron eliminar mapeos de $service_name"
+        ((error_count++))
+      fi
+      
+      rm -f "$temp_file"
+    else
+      echo "  ℹ️  No se encontraron mapeos en $service_name"
+    fi
+  done
+  
+  echo ""
+  echo "✅ Limpieza completada:"
+  echo "   🧹 Contenedores limpiados: $cleaned_count"
+  if [ $error_count -gt 0 ]; then
+    echo "   ⚠ Errores: $error_count"
+  fi
+  
+  # Limpiar archivos temporales residuales
+  rm -f /tmp/hosts_siba
+}
+
+# =============================
+# VARIABLES GLOBALES
+# =============================
+declare -A fqdn_mappings
+declare -A container_ips
+no_local_map=false
+
+# =============================
+# PROCESAR OPCIONES
+# =============================
+project_paths=()
+reset_mode=false
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -h|--help)
+      show_help
+      exit 0
+      ;;
+    -v|--version)
+      show_version
+      exit 0
+      ;;
+    --reset)
+      reset_mode=true
+      ;;
+    --no-local-map)
+      no_local_map=true
+      echo "🔕 Mapeo local de contenedores desactivado"
+      ;;
+    --map-fqdn-to-container=*)
+      IFS=',' read -r fqdn container_name <<< "${1#*=}"
+      if [[ -z "$fqdn" || -z "$container_name" ]]; then
+        echo "Error: Formato incorrecto en --map-fqdn-to-container"
+        echo "Use: --map-fqdn-to-container=FQDN,CONTENEDOR"
+        exit 1
+      fi
+      fqdn_mappings["$container_name"]="$fqdn"
+      echo "🔗 Mapeo FQDN configurado: $fqdn → contenedor '$container_name'"
+      ;;
+    *)
+      if [[ "$1" == "map" ]]; then
+        comando="$1"
+      else
+        project_paths+=("$1")
+      fi
+      ;;
+  esac
+  shift
+done
+
+# =============================
+# EJECUCIÓN MODO RESET
+# =============================
+if [ "$reset_mode" = true ]; then
+  reset_mappings
+  exit 0
+fi
+
+# =============================
+# VALIDACIÓN DE PARÁMETROS (MODO MAP)
+# =============================
+if [ "$comando" != "map" ]; then
+  echo "Error: Comando no reconocido"
+  echo "Use '$0 --help' para más información"
+  exit 1
+fi
+
+if [ ${#project_paths[@]} -eq 0 ]; then
+  echo "Error: Se requiere al menos una ruta de proyecto"
+  echo "Use '$0 --help' para más información"
+  exit 1
+fi
+
+if [ "$no_local_map" = true ] && [ ${#fqdn_mappings[@]} -eq 0 ]; then
+  echo "Error: --no-local-map requiere al menos un mapeo --map-fqdn-to-container"
+  echo "Use '$0 --help' para más información"
+  exit 1
+fi
+
+# =============================
+# MODO MAP (inyectar en contenedores)
+# =============================
+
+echo "🔍 Iniciando mapeo de contenedores..."
+
+# Primero limpiar mapeos anteriores para evitar duplicados
+echo "🧹 Limpiando mapeos anteriores..."
+for container in $(docker ps -q 2>/dev/null); do
+  docker exec -u 0 "$container" sh -c "grep -q 'SIBA-CONTAINERS' /etc/hosts" 2>/dev/null
+  if [ $? -eq 0 ]; then
+    temp_file=$(mktemp)
+    docker exec -u 0 "$container" sh -c "cat /etc/hosts" 2>/dev/null | \
+      sed '/# >>> SIBA-CONTAINERS-START/,/# <<< SIBA-CONTAINERS-END/d' > "$temp_file"
+    docker cp "$temp_file" "$container":/etc/hosts >/dev/null 2>&1
+    rm -f "$temp_file"
+  fi
+done
+
+temp_file=$(mktemp)
+echo "# >>> SIBA-CONTAINERS-START" >> "$temp_file"
+echo "# Generado: $(date)" >> "$temp_file"
+
+# Primera pasada: recolectar información de todos los contenedores
+for ruta in "${project_paths[@]}"; do
+  if [ -f "$ruta/docker-compose.yml" ]; then
+    # Eliminar subshell para mantener container_ips en scope global
+    cd "$ruta" || continue
+
+    # Esperar contenedores activos
+    containers=""
+    for i in {1..3}; do
+      containers=$(docker compose ps -q)
+      if [ -n "$containers" ]; then
+        break
+      else
+        echo "⏳ Esperando contenedores en $ruta... ($i/3)"
+        sleep 4
+      fi
+    done
+
+    if [ -n "$containers" ]; then
+      while IFS= read -r container_id; do
+        # Obtener el nombre del servicio usando la etiqueta de Docker Compose
+        service_name=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$container_id")
+        if [ -z "$service_name" ]; then
+          # Fallback: limpiar el nombre del contenedor
+          service_name=$(docker inspect -f '{{.Name}}' "$container_id" | sed 's|^/||' | sed 's/^[^_]*_//')
+        fi
+        ip=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{if $v.IPAddress}}{{printf "%s" $v.IPAddress}}{{break}}{{end}}{{end}}' "$container_id")
+
+        if [ -n "$ip" ]; then
+          # Almacenar IP para mapeos FQDN usando el nombre del servicio
+          container_ips["$service_name"]="$ip"
+          
+          # Solo agregar al mapeo local si no está desactivado
+          if [ "$no_local_map" = false ]; then
+            echo "$ip    ${service_name}" >> "$temp_file"
+          fi
+        fi
+      done <<< "$containers"
+    fi
+  else
+    echo "⚠ docker-compose.yml no encontrado en: $ruta"
+  fi
+done
+
+# Agregar mapeos FQDN al archivo temporal
+if [ ${#fqdn_mappings[@]} -gt 0 ]; then
+  if [ "$no_local_map" = false ] && [ -s "$temp_file" ]; then
+    echo "" >> "$temp_file"
+  fi
+  echo "# Mapeos FQDN personalizados" >> "$temp_file"
+  for container_name in "${!fqdn_mappings[@]}"; do
+    fqdn="${fqdn_mappings[$container_name]}"
+    ip="${container_ips[$container_name]}"
+    if [[ -n "$ip" && -n "$fqdn" ]]; then
+      echo "$ip    $fqdn" >> "$temp_file"
+      echo "✅ Mapeo FQDN: $fqdn → $ip ($container_name)"
+    else
+      echo "⚠ No se pudo mapear FQDN '$fqdn': contenedor '$container_name' no encontrado o sin IP"
+    fi
+  done
+fi
+
+echo "# <<< SIBA-CONTAINERS-END" >> "$temp_file"
+
+# =============================
+# INYECTAR EN /etc/hosts DE CADA CONTENEDOR
+# =============================
+echo "📦 Inyectando mapeo dentro de los contenedores..."
+cat "$temp_file" > /tmp/hosts_siba
+
+# Verificar si hay contenido para inyectar
+if [ ! -s "$temp_file" ] || [ $(grep -v "^#" "$temp_file" | wc -l) -eq 0 ]; then
+  echo "⚠ No hay entradas para inyectar (archivo hosts vacío)"
+  rm -f "$temp_file" /tmp/hosts_siba
+  exit 0
+fi
+
+for container in $(docker ps -q); do
+  # Obtener nombre consistente usando mismo método que en IP collection
+  service_name=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$container")
+  if [ -z "$service_name" ]; then
+      service_name=$(docker inspect -f '{{.Name}}' "$container" | sed 's|^/||' | sed 's/^[^_]*_//')
+  fi
+  echo "  ➜ Procesando $service_name ..."
+  
+  # Crear archivo temporal específico para este contenedor
+  container_temp_file=$(mktemp)
+  cat "$temp_file" > "$container_temp_file"
+  
+  # Remover mapeos FQDN donde el FQDN apunta a este mismo contenedor
+  if [ ${#fqdn_mappings[@]} -gt 0 ]; then
+    for target_container in "${!fqdn_mappings[@]}"; do
+      if [[ "$service_name" == "$target_container" ]]; then
+        fqdn="${fqdn_mappings[$target_container]}"
+        # Eliminar líneas que contengan el FQDN mapeado a este contenedor
+        sed -i "/$fqdn/d" "$container_temp_file"
+        echo "    🔄 Excluyendo auto-mapeo FQDN: $fqdn"
+      fi
+    done
+  fi
+  
+  docker cp "$container_temp_file" "$container":/etc/hosts_siba >/dev/null 2>&1
+  docker exec -u 0 "$container" sh -c "cat /etc/hosts_siba >> /etc/hosts" >/dev/null 2>&1
+  if [ $? -eq 0 ]; then
+    echo "    ✅ Mapeo inyectado correctamente en /etc/hosts"
+  else
+    echo "    ⚠ No se pudo inyectar el mapeo (verificar permisos del contenedor)"
+  fi
+  
+  rm -f "$container_temp_file"
+done
+
+rm -f "$temp_file" /tmp/hosts_siba
+echo "✅ Todos los contenedores activos fueron actualizados."
+
+# Mostrar resumen de mapeos
+echo ""
+if [ "$no_local_map" = false ]; then
+  echo "📋 Resumen de mapeos aplicados:"
+  echo "   🔄 Mapeo local de contenedores: ACTIVADO"
+else
+  echo "📋 Resumen de mapeos aplicados:"
+  echo "   🔄 Mapeo local de contenedores: DESACTIVADO"
+fi
+
+if [ ${#fqdn_mappings[@]} -gt 0 ]; then
+  echo "   🌐 Mapeos FQDN configurados:"
+  for container_name in "${!fqdn_mappings[@]}"; do
+    fqdn="${fqdn_mappings[$container_name]}"
+    ip="${container_ips[$container_name]}"
+    if [[ -n "$ip" ]]; then
+      echo "      - $fqdn → $ip ($container_name)"
+    else
+      echo "      - $fqdn → ❌ NO ENCONTRADO ($container_name)"
+    fi
+  done
+fi

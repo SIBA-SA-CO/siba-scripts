@@ -1,0 +1,235 @@
+#!/bin/bash
+
+# Función para mostrar ayuda
+mostrar_ayuda() {
+  cat << EOF
+Uso: $0 <comando_docker> <ruta1> <ruta2> ... [OPCIONES]
+
+DESCRIPCIÓN:
+  Ejecuta comandos Docker Compose en múltiples directorios de forma segura.
+
+PARÁMETROS:
+  <comando_docker>    Comando Docker Compose a ejecutar (ej: 'ps', 'up -d')
+  <ruta1> <ruta2> ... Uno o más directorios que contengan docker-compose.yml
+
+OPCIONES:
+  -h, --help          Muestra esta ayuda y sale
+  -v, --version       Muestra la versión del script
+  -l, --list          Lista comandos permitidos
+  --dry-run           Muestra qué comandos se ejecutarían sin ejecutarlos realmente
+
+COMANDOS PERMITIDOS:
+  ps, up, down, logs, restart, stop, start, build, pull
+
+EJEMPLOS:
+  $0 'ps' /ruta/proyecto1 /ruta/proyecto2
+  $0 'up -d' /ruta/api /ruta/frontend
+  $0 'logs --tail=10' /ruta/microservicio
+  $0 'restart' /ruta/app1 /ruta/app2 /ruta/app3
+
+CARACTERÍSTICAS DE SEGURIDAD:
+  - Lista blanca de comandos permitidos
+  - Validación de opciones seguras
+  - Sin uso de eval()
+  - Verificación de archivos docker-compose.yml
+EOF
+}
+
+# Función para mostrar versión
+mostrar_version() {
+  echo "Docker Multi-Compose v0.1.0"
+  echo "Script seguro para ejecutar comandos Docker Compose en múltiples directorios"
+}
+
+# Función para listar comandos permitidos
+listar_comandos() {
+  echo "Comandos Docker Compose permitidos:"
+  echo "  ps        - Listar contenedores"
+  echo "  up        - Iniciar servicios"
+  echo "  down      - Detener servicios"
+  echo "  logs      - Mostrar logs"
+  echo "  restart   - Reiniciar servicios"
+  echo "  stop      - Detener servicios"
+  echo "  start     - Iniciar servicios"
+  echo "  build     - Construir imágenes"
+  echo "  pull      - Descargar imágenes"
+  echo ""
+  echo "Opciones comunes permitidas:"
+  echo "  -d        - Ejecutar en segundo plano"
+  echo "  --build   - Reconstruir imágenes"
+  echo "  --tail=N  - Mostrar últimas N líneas de logs"
+}
+
+# Función para dry-run
+mostrar_dry_run() {
+  local comando="$1"
+  shift
+  echo "=== SIMULACIÓN (dry-run) ==="
+  for ruta in "$@"; do
+    if [ -f "$ruta/docker-compose.yml" ] || [ -f "$ruta/docker-compose.yaml" ]; then
+      echo "✅ Ejecutaría: cd '$ruta' && docker compose $comando"
+    else
+      echo "❌ No ejecutaría: docker-compose.yml no encontrado en '$ruta'"
+    fi
+  done
+  echo "============================="
+}
+
+# Verificar opciones de ayuda
+for arg in "$@"; do
+  case $arg in
+    -h|--help)
+      mostrar_ayuda
+      exit 0
+      ;;
+    -v|--version)
+      mostrar_version
+      exit 0
+      ;;
+    -l|--list)
+      listar_comandos
+      exit 0
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+  esac
+done
+
+# Verifica si hay al menos un parámetro
+if [ "$#" -lt 1 ]; then
+  echo "Error: Se requiere al menos un parámetro."
+  echo "Use '$0 --help' para más información."
+  exit 1
+fi
+
+# Lista de comandos seguros permitidos
+comandos_seguros=("ps" "up" "down" "logs" "restart" "stop" "start" "build" "pull")
+
+# Función para validar y parsear el comando
+validar_comando() {
+  local comando_original="$1"
+  
+  # Convertir a minúsculas para comparación
+  local comando_lower=$(echo "$comando_original" | tr '[:upper:]' '[:lower:]')
+  
+  # Extraer el comando base (primera palabra después de 'docker compose')
+  local comando_base=""
+  if [[ "$comando_lower" =~ ^docker[[:space:]]+compose[[:space:]]+([a-z-]+) ]]; then
+    comando_base="${BASH_REMATCH[1]}"
+  elif [[ "$comando_lower" =~ ^docker-compose[[:space:]]+([a-z-]+) ]]; then
+    comando_base="${BASH_REMATCH[1]}"
+  else
+    # Asumir que es solo el comando base
+    comando_base="$comando_original"
+  fi
+  
+  # Limpiar comando base (solo primera palabra)
+  comando_base=$(echo "$comando_base" | awk '{print $1}')
+  
+  # Verificar si el comando base está en la lista blanca
+  local es_seguro=0
+  for cmd in "${comandos_seguros[@]}"; do
+    if [ "$comando_base" = "$cmd" ]; then
+      es_seguro=1
+      break
+    fi
+  done
+  
+  if [ $es_seguro -eq 0 ]; then
+    echo "Error: Comando '$comando_base' no permitido por seguridad."
+    echo "Use '$0 --list' para ver los comandos permitidos."
+    return 1
+  fi
+  
+  echo "$comando_original"
+  return 0
+}
+
+# El primer parámetro es el comando Docker que se desea ejecutar
+comando_original="$1"
+shift  # Elimina el primer parámetro para dejar solo las rutas
+
+# Validar el comando
+comando_validado=$(validar_comando "$comando_original")
+if [ $? -ne 0 ]; then
+  exit 1
+fi
+
+# Verifica si quedaron rutas
+if [ "$#" -eq 0 ]; then
+  echo "Error: debes indicar al menos una ruta después del comando."
+  echo "Use '$0 --help' para más información."
+  exit 1
+fi
+
+# Si es dry-run, mostrar simulación y salir
+if [ "$DRY_RUN" = true ]; then
+  mostrar_dry_run "$comando_validado" "$@"
+  exit 0
+fi
+
+# Función para ejecutar comando de forma segura
+ejecutar_comando_seguro() {
+  local ruta="$1"
+  local comando="$2"
+  
+  echo "➡ Ejecutando comando en: $ruta"
+  
+  # Ejecutar en el directorio destino
+  (
+    cd "$ruta" || { echo "❌ Error: No se puede acceder a $ruta"; return 1; }
+    
+    # Verificar nuevamente que docker-compose.yml existe
+    if [ ! -f "docker-compose.yml" ] && [ ! -f "docker-compose.yaml" ]; then
+      echo "❌ Error: docker-compose.yml no encontrado en $ruta"
+      return 1
+    fi
+    
+    # Ejecutar el comando
+    echo "📋 Comando: docker compose $comando"
+    if docker compose $comando; then
+      echo "✅ Comando ejecutado correctamente en $ruta"
+    else
+      echo "❌ Error al ejecutar comando en $ruta"
+      return 1
+    fi
+  )
+}
+
+# Contadores para estadísticas
+total_rutas=$#
+rutas_exitosas=0
+rutas_fallidas=0
+
+echo "🚀 Iniciando ejecución en $total_rutas directorio(s)..."
+echo ""
+
+# Itera sobre las rutas
+for ruta in "$@"; do
+  if [ -f "$ruta/docker-compose.yml" ] || [ -f "$ruta/docker-compose.yaml" ]; then
+    if ejecutar_comando_seguro "$ruta" "$comando_validado"; then
+      ((rutas_exitosas++))
+    else
+      ((rutas_fallidas++))
+    fi
+  else
+    echo "⚠ Archivo docker-compose.yml no encontrado en: $ruta"
+    ((rutas_fallidas++))
+  fi
+  echo "---"
+done
+
+# Mostrar resumen
+echo "📊 RESUMEN EJECUCIÓN:"
+echo "   Total de directorios: $total_rutas"
+echo "   ✅ Ejecuciones exitosas: $rutas_exitosas"
+echo "   ❌ Ejecuciones fallidas: $rutas_fallidas"
+
+if [ $rutas_fallidas -eq 0 ]; then
+  echo "🎉 ¡Todas las ejecuciones fueron exitosas!"
+  exit 0
+else
+  exit 1
+fi

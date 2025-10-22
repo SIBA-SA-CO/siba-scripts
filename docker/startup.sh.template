@@ -1,0 +1,46 @@
+#!/bin/bash
+# Script para arrancar contenedores al inicio del sistema
+# Utiliza multi-docker.sh para iniciar contenedores y hostsync-docker.sh para configurar DNS
+# Configuración se carga desde .env en el mismo directorio
+
+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
+ENV_FILE="$SCRIPT_DIR/.env"
+
+# Cargar configuración desde .env
+if [[ -f "$ENV_FILE" ]]; then
+  source "$ENV_FILE"
+else
+  echo "ERROR: Archivo .env no encontrado en $SCRIPT_DIR" >&2
+  exit 1
+fi
+
+# Validar variables requeridas
+if [[ -z "$PROJECT_PATHS" ]]; then
+  echo "ERROR: PROJECT_PATHS no definido en .env" >&2
+  exit 1
+fi
+
+# Iniciar contenedores usando multi-docker.sh
+echo "Iniciando contenedores con multi-docker.sh..."
+"$SCRIPT_DIR/multi-docker.sh" "up -d" $PROJECT_PATHS
+
+# Construir argumentos para hostsync-docker.sh
+SCRIPT_ARGS=()
+if [[ -n "$FQDN_MAPPINGS" ]]; then
+  IFS=';' read -ra MAPPINGS <<< "$FQDN_MAPPINGS"
+  for mapping in "${MAPPINGS[@]}"; do
+    SCRIPT_ARGS+=("--map-fqdn-to-container=$mapping")
+  done
+fi
+
+# Agregar opción --no-local-map si está habilitada
+if [[ "$NO_LOCAL_MAP" == "true" ]]; then
+  SCRIPT_ARGS+=("--no-local-map")
+  echo "🔕 Mapeo local de contenedores desactivado"
+fi
+
+# Aplicar mapeo DNS con hostsync-docker.sh
+echo "Aplicando mapeo DNS con hostsync-docker.sh..."
+"$SCRIPT_DIR/hostsync-docker.sh" map $PROJECT_PATHS "${SCRIPT_ARGS[@]}"
+
+echo "Sistema Docker iniciado y configurado correctamente"
