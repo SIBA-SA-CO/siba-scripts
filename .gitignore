@@ -1,5 +1,6 @@
 .env
 *.sh
+docker/.env
 /std-dev2/
 /std-dev2/*
 /cleandbscripts/
