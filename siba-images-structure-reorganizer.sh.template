@@ -1,0 +1,106 @@
+#!/bin/bash
+# ============================================================================
+# Script: siba-images-structure-reorganizer.sh
+# Autor: Edwar
+# Fecha: 2025-10-30
+#
+# Descripción general:
+# ----------------------------------------------------------------------------
+#   Este script reorganiza TODAS las imágenes ubicadas en una carpeta base
+#   moviéndolas a subcarpetas basadas en los DOS PRIMEROS CARACTERES del nombre
+#   de archivo. Es compatible con nombres MD5 o cualquier otro tipo de nombre.
+#
+#   Ejemplo:
+#     8a7d2bc9e2e493d4c5e9a3a0b8f12b9f.jpg → ./8a/8a7d2bc9e2e493d4c5e9a3a0b8f12b9f.jpg
+#     logo_principal.png                  → ./lo/logo_principal.png
+#
+#   Esto permite mejorar:
+#     - El rendimiento en sistemas de archivos con muchas imágenes.
+#     - La indexación y sincronización con CDN o servicios de caché.
+#     - La organización interna del contenido multimedia.
+#
+# ----------------------------------------------------------------------------
+# Uso:
+#   ./siba-images-structure-reorganizer.sh /ruta/a/imagenes
+#
+# Ejemplo práctico:
+#   ./siba-images-structure-reorganizer.sh /var/www/media/images
+#
+# Resultados esperados:
+#   /var/www/media/images/
+#     ├── 8a/
+#     │    └── 8a7d2bc9e2e493d4c5e9a3a0b8f12b9f.jpg
+#     ├── lo/
+#     │    └── logo_principal.png
+#     └── po/
+#          └── portada.jpg
+#
+# ----------------------------------------------------------------------------
+# Requisitos:
+#   - Bash 4.0 o superior.
+#   - Permisos de escritura sobre la carpeta base.
+#   - Espacio suficiente en disco para mover los archivos.
+#
+# ----------------------------------------------------------------------------
+# Notas importantes:
+#   - Este script MUEVE los archivos (no los copia).
+#   - Si el proceso se interrumpe, los archivos ya movidos no se perderán,
+#     pero la ejecución deberá relanzarse para completar los faltantes.
+#   - Es compatible con rutas relativas o absolutas.
+#   - No altera archivos dentro de subcarpetas existentes (solo nivel raíz).
+# ============================================================================
+
+# === Validación de parámetros de entrada ===
+if [ -z "$1" ]; then
+  echo "❌ Error: Debes indicar la ruta base."
+  echo "Uso: $0 /ruta/a/imagenes"
+  exit 1
+fi
+
+BASE="$1"
+
+# Verifica que la ruta sea un directorio válido
+if [ ! -d "$BASE" ]; then
+  echo "❌ Error: La ruta '$BASE' no existe o no es un directorio válido."
+  exit 1
+fi
+
+# Cambia al directorio base
+cd "$BASE" || { echo "❌ No se pudo acceder a $BASE"; exit 1; }
+
+echo "🚀 Iniciando reorganización de imágenes en: $BASE"
+echo "---------------------------------------------"
+
+# Inicializa contador total
+count_total=0
+
+# === Bucle principal de reorganización ===
+# Usa find con -print0 para manejar nombres con espacios o caracteres especiales
+while IFS= read -r -d '' file; do
+  # Obtiene el nombre base del archivo (sin ruta)
+  name=$(basename "$file")
+
+  # Extrae los dos primeros caracteres como prefijo
+  prefix=${name:0:2}
+
+  # Crea la carpeta si no existe
+  mkdir -p "$prefix"
+
+  # Mueve el archivo a la carpeta correspondiente
+  mv "$file" "$prefix/$name"
+
+  # Incrementa el contador
+  ((count_total++))
+
+  # Muestra progreso cada 1000 archivos
+  if (( count_total % 1000 == 0 )); then
+    echo "📦 Procesadas $count_total imágenes..."
+  fi
+done < <(find . -maxdepth 1 -type f -print0)
+
+# === Reporte final ===
+echo "---------------------------------------------"
+echo "✅ Reorganización completa en $BASE"
+echo "📊 Total de archivos procesados: $count_total"
+echo "🕒 Fecha de finalización: $(date '+%Y-%m-%d %H:%M:%S')"
+
