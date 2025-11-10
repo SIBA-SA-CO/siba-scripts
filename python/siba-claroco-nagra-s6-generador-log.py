@@ -35,40 +35,42 @@ else:
 # Limpiar registros existentes
 existing_logs = [log.strip() for log in existing_logs]
 
-# Abrir el archivo de salida en modo de escritura
-with open(output_file, 'w', encoding='utf-8') as outfile:
-    outfile.write('\n'.join(existing_logs))
-    outfile.write('\n')
+# Procesar archivos y recolectar nuevas entradas
+new_entries = []
+for file_name in filtered_files:
+    file_path = os.path.join(folder_path, file_name)
+    error_content = ''
+    channelId = ''
 
-    # Iterar sobre los archivos filtrados
-    for file_name in filtered_files:
-        file_path = os.path.join(folder_path, file_name)
-        error_content = ''
-        channelId = ''
+    # Procesar archivos según extensión
+    if extension in [".errorlog", ".error"]:
+        with open(file_path, 'r', encoding='utf-8') as error_file:
+            error_content = error_file.read().replace('\n', ' ').replace("'", '"')
 
-        # Procesar archivos según extensión
-        if extension in [".errorlog", ".error"]:
-            with open(file_path, 'r', encoding='utf-8') as error_file:
-                error_content = error_file.read().replace('\n', ' ').replace("'", '"')
+        file_timestamp = os.path.getmtime(file_path)
+        file_date = time.ctime(file_timestamp)
 
-            file_timestamp = os.path.getmtime(file_path)
-            file_date = time.ctime(file_timestamp)
+        registro = f"{file_date} {cliente} {file_name} {error_content}"
+        if registro.strip() not in existing_logs:
+            new_entries.append(registro)
 
-            registro = f"{file_date} {cliente} {file_name} {error_content}"
-            if registro.strip() not in existing_logs:
-                outfile.write(registro + '\n')
+    elif extension == ".failed":
+        with open(file_path, 'r', encoding='utf-8') as channelId_file:
+            chanelid_content = channelId_file.read()
 
-        elif extension == ".failed":
-            with open(file_path, 'r', encoding='utf-8') as channelId_file:
-                chanelid_content = channelId_file.read()
+        match = re.search(r'<ChannelId>(.*?)</ChannelId>', chanelid_content)
+        if match:
+            channelId = match.group(1)
 
-            match = re.search(r'<ChannelId>(.*?)</ChannelId>', chanelid_content)
-            if match:
-                channelId = match.group(1)
+        file_timestamp = os.path.getmtime(file_path)
+        file_date = time.ctime(file_timestamp)
 
-            file_timestamp = os.path.getmtime(file_path)
-            file_date = time.ctime(file_timestamp)
+        registro = f"{file_date} {cliente} {file_name}: {channelId}"
+        if registro.strip() not in existing_logs:
+            new_entries.append(registro)
 
-            registro = f"{file_date} {cliente} {file_name}: {channelId}"
-            if registro.strip() not in existing_logs:
-                outfile.write(registro + '\n')
+# Escribir nuevas entradas en modo append (añadir al final)
+if new_entries:
+    with open(output_file, 'a', encoding='utf-8') as outfile:
+        for entry in new_entries:
+            outfile.write(entry + '\n')
