@@ -1,0 +1,254 @@
+#!/bin/bash
+
+set -u
+
+mostrar_uso() {
+    echo "Uso: $0 --source-dir <ruta_local> --pattern <patrones_xml> --host <ftp_host> --user <ftp_user> --password <ftp_password> --remote-dir <ruta_ftp> --rename-template <plantilla> [opciones]"
+    echo ""
+    echo "Parametros obligatorios:"
+    echo "  --source-dir         Ruta local donde estan los XML origen"
+    echo "  --pattern            Patron(es) separados por coma. Ej: \"SIBA_*.xml,FACT_*.xml\""
+    echo "  --host               Servidor FTP destino"
+    echo "  --user               Usuario FTP"
+    echo "  --password           Password FTP"
+    echo "  --remote-dir         Ruta destino dentro del FTP"
+    echo "  --rename-template    Nombre destino. Variables: %name, %base, %ext, %date, %datetime, %seq"
+    echo ""
+    echo "Opciones:"
+    echo "  --protocol           Protocolo de envio: ftp o sftp. Default: ftp"
+    echo "  --port               Puerto FTP/SFTP. Default: 21"
+    echo "  --tmp-dir            Ruta alternativa para copiar/renombrar antes de subir. Default: --source-dir"
+    echo "  --overwrite          Procesa y sobrescribe aunque ya exista la copia local renombrada"
+    echo "  --insecure           No valida certificado si se usa FTPS"
+    echo "  --dry-run            Muestra lo que haria sin copiar ni enviar"
+    echo "  --help               Muestra esta ayuda"
+    echo ""
+    echo "Ejemplo:"
+    echo "  $0 --source-dir /var/siba/xml --pattern \"SIBA_*.xml\" --host ftp.example.com --user usuario --password clave --remote-dir /entrada/xml --rename-template \"procesado_%base_%date_%seq%ext\""
+}
+
+salir_error() {
+    echo "ERROR: $1" >&2
+    exit 1
+}
+
+requerir_comando() {
+    command -v "$1" >/dev/null 2>&1 || salir_error "No se encontro el comando requerido: $1"
+}
+
+normalizar_remote_dir() {
+    local ruta="$1"
+    ruta="${ruta#/}"
+    ruta="${ruta%/}"
+    echo "$ruta"
+}
+
+aplicar_plantilla() {
+    local plantilla="$1"
+    local nombre="$2"
+    local seq="$3"
+    local base="${nombre%.*}"
+    local ext=""
+    local fecha
+    local fecha_hora
+    local salida
+
+    if [[ "$nombre" == *.* ]]; then
+        ext=".${nombre##*.}"
+    fi
+
+    fecha=$(date +%Y%m%d)
+    fecha_hora=$(date +%Y%m%d%H%M%S)
+    salida="$plantilla"
+    salida="${salida//%name/$nombre}"
+    salida="${salida//%base/$base}"
+    salida="${salida//%ext/$ext}"
+    salida="${salida//%datetime/$fecha_hora}"
+    salida="${salida//%date/$fecha}"
+    salida="${salida//%seq/$seq}"
+
+    echo "$salida"
+}
+
+agregar_archivos_por_patron() {
+    local patron="$1"
+    local archivo
+    local coincidencias=0
+
+    shopt -s nullglob
+    for archivo in "$source_dir"/$patron; do
+        if [ -f "$archivo" ] && [[ "${archivo,,}" == *.xml ]]; then
+            archivos+=("$archivo")
+            coincidencias=$((coincidencias + 1))
+        fi
+    done
+    shopt -u nullglob
+
+    if [ "$coincidencias" -eq 0 ]; then
+        archivos_no_encontrados+=("$source_dir/$patron")
+    fi
+}
+
+source_dir=""
+patterns=""
+ftp_host=""
+ftp_port="21"
+ftp_protocol="ftp"
+ftp_user=""
+ftp_password=""
+remote_dir=""
+rename_template=""
+tmp_dir=""
+dry_run="false"
+curl_insecure="false"
+overwrite="false"
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --source-dir)
+            source_dir="$2"
+            shift 2
+            ;;
+        --pattern)
+            patterns="$2"
+            shift 2
+            ;;
+        --host)
+            ftp_host="$2"
+            shift 2
+            ;;
+        --port)
+            ftp_port="$2"
+            shift 2
+            ;;
+        --protocol)
+            ftp_protocol="$2"
+            shift 2
+            ;;
+        --user)
+            ftp_user="$2"
+            shift 2
+            ;;
+        --password)
+            ftp_password="$2"
+            shift 2
+            ;;
+        --remote-dir)
+            remote_dir="$2"
+            shift 2
+            ;;
+        --rename-template)
+            rename_template="$2"
+            shift 2
+            ;;
+        --tmp-dir)
+            tmp_dir="$2"
+            shift 2
+            ;;
+        --overwrite)
+            overwrite="true"
+            shift
+            ;;
+        --insecure)
+            curl_insecure="true"
+            shift
+            ;;
+        --dry-run)
+            dry_run="true"
+            shift
+            ;;
+        --help|-h)
+            mostrar_uso
+            exit 0
+            ;;
+        *)
+            salir_error "Parametro no reconocido: $1"
+            ;;
+    esac
+done
+
+[ -n "$source_dir" ] || salir_error "Falta --source-dir"
+[ -n "$patterns" ] || salir_error "Falta --pattern"
+[ -n "$ftp_host" ] || salir_error "Falta --host"
+[ -n "$ftp_user" ] || salir_error "Falta --user"
+[ -n "$ftp_password" ] || salir_error "Falta --password"
+[ -n "$remote_dir" ] || salir_error "Falta --remote-dir"
+[ -n "$rename_template" ] || salir_error "Falta --rename-template"
+[ -d "$source_dir" ] || salir_error "No existe la ruta local: $source_dir"
+[[ "$ftp_port" =~ ^[0-9]+$ ]] || salir_error "--port debe ser numerico"
+[[ "$ftp_protocol" =~ ^(ftp|sftp)$ ]] || salir_error "--protocol debe ser ftp o sftp"
+
+requerir_comando curl
+
+remote_dir=$(normalizar_remote_dir "$remote_dir")
+archivos=()
+archivos_no_encontrados=()
+
+IFS=',' read -ra lista_patrones <<< "$patterns"
+for patron in "${lista_patrones[@]}"; do
+    patron="$(echo "$patron" | xargs)"
+    [ -n "$patron" ] && agregar_archivos_por_patron "$patron"
+done
+
+for archivo_no_encontrado in "${archivos_no_encontrados[@]}"; do
+    echo "NO ENCONTRADO: no existe en la ruta de origen $archivo_no_encontrado"
+done
+
+if [ "${#archivos[@]}" -eq 0 ]; then
+    echo "No se encontraron archivos XML para los patrones indicados."
+    exit 0
+fi
+
+IFS=$'\n' archivos=($(printf '%s\n' "${archivos[@]}" | sort -u))
+unset IFS
+
+if [ -z "$tmp_dir" ]; then
+    tmp_dir="$source_dir"
+else
+    mkdir -p "$tmp_dir" || salir_error "No se pudo crear la ruta temporal: $tmp_dir"
+fi
+
+copiados=0
+enviados=0
+omitidos=0
+
+for indice in "${!archivos[@]}"; do
+    archivo_origen="${archivos[$indice]}"
+    nombre_original=$(basename "$archivo_origen")
+    seq=$((indice + 1))
+    nombre_destino=$(aplicar_plantilla "$rename_template" "$nombre_original" "$seq")
+    archivo_temporal="$tmp_dir/$nombre_destino"
+    ftp_url="$ftp_protocol://$ftp_host:$ftp_port/$remote_dir/$nombre_destino"
+
+    if [ "$dry_run" = "true" ]; then
+        echo "COPIARIA: $archivo_origen -> $archivo_temporal"
+        echo "ENVIARIA: $archivo_temporal -> $ftp_url"
+        continue
+    fi
+
+    if [ "$overwrite" != "true" ] && [ -f "$archivo_temporal" ]; then
+        echo "OMITIDO: ya existe la copia local renombrada $archivo_temporal"
+        omitidos=$((omitidos + 1))
+        continue
+    fi
+
+    if [ "$archivo_origen" != "$archivo_temporal" ]; then
+        cp "$archivo_origen" "$archivo_temporal" || salir_error "No se pudo copiar $archivo_origen a $archivo_temporal"
+        copiados=$((copiados + 1))
+    fi
+
+    curl_args=(--fail --silent --show-error --ftp-create-dirs --user "$ftp_user:$ftp_password" -T "$archivo_temporal")
+    if [ "$curl_insecure" = "true" ]; then
+        curl_args+=(--insecure)
+    fi
+
+    curl "${curl_args[@]}" "$ftp_url" || salir_error "No se pudo enviar $archivo_temporal a $ftp_url"
+    enviados=$((enviados + 1))
+    echo "ENVIADO: $archivo_origen -> $ftp_url"
+done
+
+if [ "$dry_run" = "true" ]; then
+    echo "Resumen: coincidencias=${#archivos[@]} enviados=0"
+else
+    echo "Resumen: copiados=$copiados enviados=$enviados omitidos=$omitidos"
+fi
