@@ -5,3 +5,5 @@ docker/.env
 /std-dev2/*
 /cleandbscripts/
 /cleandbscripts/*
+/chrooted-base/
+/chrooted-base/*
