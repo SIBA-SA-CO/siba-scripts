@@ -2,38 +2,230 @@
 
 set -u
 
+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
+ENV_FILE_POR_DEFECTO="$SCRIPT_DIR/.env"
+LOG_TAG="siba-ftp-xml-uploader"
+LOG_SELLO_INICIO=""
+LOG_EPOCH_INICIO=""
+
 mostrar_uso() {
-    echo "Uso: $0 --source-dir <ruta_local> --pattern <patrones_xml> --host <ftp_host> --user <ftp_user> --password <ftp_password> --remote-dir <ruta_ftp> --rename-template <plantilla> [opciones]"
-    echo ""
-    echo "Parametros obligatorios:"
-    echo "  --source-dir         Ruta local donde estan los XML origen"
-    echo "  --pattern            Patron(es) separados por coma. Ej: \"SIBA_*.xml,FACT_*.xml\""
-    echo "  --host               Servidor FTP destino"
-    echo "  --user               Usuario FTP"
-    echo "  --password           Password FTP"
-    echo "  --remote-dir         Ruta destino dentro del FTP"
-    echo "  --rename-template    Nombre destino. Variables: %name, %base, %ext, %date, %datetime, %seq"
-    echo ""
-    echo "Opciones:"
-    echo "  --protocol           Protocolo de envio: ftp o sftp. Default: ftp"
-    echo "  --port               Puerto FTP/SFTP. Default: 21"
-    echo "  --tmp-dir            Ruta alternativa para copiar/renombrar antes de subir. Default: --source-dir"
-    echo "  --overwrite          Procesa y sobrescribe aunque ya exista la copia local renombrada"
-    echo "  --insecure           No valida certificado si se usa FTPS"
-    echo "  --dry-run            Muestra lo que haria sin copiar ni enviar"
-    echo "  --help               Muestra esta ayuda"
-    echo ""
-    echo "Ejemplo:"
-    echo "  $0 --source-dir /var/siba/xml --pattern \"SIBA_*.xml\" --host ftp.example.com --user usuario --password clave --remote-dir /entrada/xml --rename-template \"procesado_%base_%date_%seq%ext\""
+    log salida "$(cat <<EOF
+Uso: $0 --config <prefijo> [opciones]
+   o: $0 --source-dir <ruta> --pattern <patrones> --host <host> --user <user> --password <clave> --remote-dir <ruta_ftp> [opciones]
+
+Parametros obligatorios:
+  --source-dir         Ruta local donde estan los XML origen
+  --pattern            Patron(es) separados por coma
+                       ej: --pattern "SIBA_*.xml,FACT_*.xml"
+                       ej: --pattern "nagra_46*"
+  --host               Servidor FTP/SFTP destino
+                       ej: --host s11.siba.com.co
+                       ej: --host 192.168.1.50
+  --user               Usuario FTP/SFTP
+                       ej: --user amconpawepg
+  --password           Password FTP/SFTP
+                       ej: --password "Clave#2026"
+  --remote-dir         Ruta destino dentro del servidor
+                       ej: --remote-dir /home/amconpawepg/xmlfiles
+                       ej: --remote-dir "entrada/siba"
+
+Opciones:
+  --rename-template    Nombre destino. Opcional: si se omite cada archivo sube
+                       con el nombre que tiene en el origen.
+                       ej: --rename-template "mma_%base%ext"  -> mma_nagra_46.xml
+                       ej: --rename-template "%date_%seq%ext"   -> 20260625_1.xml
+                       ej: --rename-template "%name"            -> conserva el nombre
+
+  Variables de --rename-template, para un archivo "nagra_46697.xml":
+    %name       nagra_46697.xml   nombre COMPLETO, ya con extension
+    %base       nagra_46697       nombre sin la ultima extension
+    %ext        .xml              ultima extension, con el punto
+    %date       20260625          fecha de ejecucion (YYYYMMDD)
+    %datetime   20260625122217    fecha y hora (YYYYMMDDHHMMSS)
+    %seq        1                 posicion en el lote, desde 1
+
+  OJO con %name y %ext: %name ya incluye la extension, asi que con %name no
+  debes volver a poner %ext, o la extension saldra duplicada.
+    "mma_%base%ext"  ->  mma_nagra_46697.xml        correcto
+    "mma_%name"      ->  mma_nagra_46697.xml        correcto (mismo resultado)
+    "mma_%name_%ext" ->  mma_nagra_46697.xml_.xml   extension duplicada
+  Cuando quieras prefijar y conservar la extension, usa %base%ext, no %name%ext.
+  --config             Prefijo de configuracion
+                       ej: --config=siba   lee SIBA_* del .env
+                       ej: --config=amco   lee AMCO_* del .env
+  --env-file           Ruta alterna del archivo .env
+                       ej: --env-file /etc/siba/siba.env
+  --protocol           Protocolo de envio: ftp, ftps o sftp
+                       ej: --protocol sftp
+                       ej: --protocol ftps
+  --port               Puerto FTP/SFTP
+                       ej: --port 22      (sftp)
+                       ej: --port 990     (ftps)
+  --tmp-dir            Ruta alternativa para copiar/renombrar antes de subir
+                       ej: --tmp-dir /var/tmp/siba
+  --overwrite          Procesa y sobrescribe aunque ya exista la copia local
+                       renombrada
+                       ej: --overwrite
+  --insecure           No valida certificado si se usa FTPS o SFTP
+                       ej: --insecure
+  --dry-run            Muestra lo que haria sin copiar ni enviar
+                       ej: --dry-run
+  --log-file           Ruta de archivo donde anexar el log con marca de tiempo
+                       ej: --log-file /var/log/siba-ftp.log
+  --connect-timeout    Segundos de espera para establecer la conexion
+                       ej: --connect-timeout 10
+  --speed-time         Segundos sin recibir datos antes de abortar
+                       ej: --speed-time 30
+  --syslog             Envia cada linea a syslog con la etiqueta
+                       "siba-ftp-xml-uploader"
+                       ej: --syslog
+  --no-<bandera>       Desactiva una bandera puesta en el .env
+                       ej: --no-dry-run    anula SIBA_DRY_RUN=true
+                       ej: --no-overwrite  anula SIBA_OVERWRITE=true
+                       ej: --no-syslog     anula SIBA_SYSLOG=true
+  --help               Muestra esta ayuda
+                       ej: --help
+
+Variables de entorno (prefijo en mayusculas + "_" + sufijo):
+  <PREFIJO>_SOURCE_DIR        equivalente a --source-dir
+  <PREFIJO>_PATTERN           equivalente a --pattern
+  <PREFIJO>_HOST              equivalente a --host
+  <PREFIJO>_USER              equivalente a --user
+  <PREFIJO>_PASSWORD          equivalente a --password
+  <PREFIJO>_REMOTE_DIR        equivalente a --remote-dir
+  <PREFIJO>_RENAME_TEMPLATE   equivalente a --rename-template (opcional)
+  <PREFIJO>_PROTOCOL          equivalente a --protocol
+  <PREFIJO>_PORT              equivalente a --port
+  <PREFIJO>_TMP_DIR           equivalente a --tmp-dir
+  <PREFIJO>_LOG_FILE          equivalente a --log-file
+  <PREFIJO>_CONNECT_TIMEOUT   equivalente a --connect-timeout
+  <PREFIJO>_SPEED_TIME        equivalente a --speed-time
+  <PREFIJO>_OVERWRITE         equivalente a --overwrite
+  <PREFIJO>_INSECURE          equivalente a --insecure
+  <PREFIJO>_DRY_RUN           equivalente a --dry-run
+  <PREFIJO>_SYSLOG            equivalente a --syslog
+  <PREFIJO>_HELP              equivalente a --help
+
+  Los valores booleanos aceptan: 1/0, true/false, yes/no, on/off, si/no.
+  Prioridad: parametros de consola > variables de entorno exportadas > archivo .env > defaults.
+  El .env se busca junto a este script; se lee linea a linea, sin ejecutarlo.
+
+  Errores frecuentes con --rename-template:
+    Extension duplicada. %name ya trae la extension, asi que con %name no debes
+    volver a poner %ext:
+      "mma_%base%ext"   -> mma_nagra_46697.xml        correcto
+      "mma_%name"       -> mma_nagra_46697.xml        correcto
+      "mma_%name_%ext"  -> mma_nagra_46697.xml_.xml   extension duplicada
+    Archivos que se pisan. Si la plantilla no incluye %name, %base ni %seq, todos
+    los archivos del lote caen en el mismo nombre y solo queda el ultimo en el
+    servidor. Con SIBA_OVERWRITE=1 el script no detecta la colision.
+    Residuos que se reprocesan. Si SIBA_TMP_DIR esta vacio, las copias
+    renombradas se escriben en la misma carpeta que --source-dir y un patron
+    Amplio como "*.xml" las vuelve a encontrar en la corrida siguiente,
+    anadiendo otra extension cada vez. Use una carpeta aparte para --tmp-dir.
+    %seq no es un contador. Es la posicion dentro del lote ya ordenado; al
+    agregar un archivo que ordene antes, los anteriores cambian de nombre.
+    "/" en la plantilla. Solo produce un nombre, no un camino: "sub/%name" falla
+    al copiar porque no se crean los directorios intermedios.
+
+  Registro: el log anexa, nunca borra. Cada corrida queda delimitada por un
+  marcador "=== INICIO ===" y un "=== FIN ===" con el codigo de salida, la
+  duracion y los contadores. Sin --log-file ni --syslog el script no escribe
+  en ningun archivo y su salida se pierde al cerrar la consola.
+
+  Directorios remotos: con ftp y ftps se crean solos si no existen. Con sftp
+  curl no puede crearlos y --remote-dir debe existir de antemano; si falta, el
+  envio falla con el error del servidor en el log. Ojo: la ruta es absoluta
+  desde la raiz del servidor SFTP, no desde el home del usuario, asi que
+  "xmlfiles" apunta a /xmlfiles y no a /home/<usuario>/xmlfiles.
+
+  Errores por archivo: si un archivo no se puede copiar o enviar, el script no
+  se detiene, anota el error, borra su copia de trabajo y sigue con el
+  siguiente. Al final informa cuantos quedaron en "fallidos" y sale con codigo
+  1 si hubo alguno, para que cron lo detecte. La copia de trabajo de un archivo
+  fallido se borra a proposito: si se dejara, el proximo intento lo tomaria
+  por ya enviado y no lo volveria a subir nunca.
+
+Ejemplo:
+  $0 --config=siba --dry-run
+  $0 --config=siba --no-dry-run --pattern "SIBA_*.xml" --remote-dir /entrada/otro
+
+Ejemplo completo (todo por consola, sin .env):
+  $0 --source-dir /datos/salida --pattern "nagra_46*.xml" \\
+     --host s11.siba.com.co --port 22 --protocol sftp \\
+     --user amconpawepg --password "Clave#2026" \\
+     --remote-dir /home/amconpawepg/xmlfiles
+
+Ejemplo con renombrado y log:
+  $0 --config=siba --no-dry-run \\
+     --rename-template "mma_%base%ext" \\
+     --log-file /var/log/siba-ftp.log
+EOF
+)"
+}
+# log <canal> <mensaje>   canal: salida | error
+# Escribe en consola, opcionalmente en --log-file y opcionalmente en syslog.
+log() {
+    local canal="$1"
+    shift
+    local mensaje="$*"
+    local sello
+    local linea
+
+    sello="$(date '+%F %T')"
+
+    if [ -n "$log_file" ]; then
+        while IFS= read -r linea; do
+            # 2>/dev/null va antes de >>: si la ruta falla, bash no imprime
+            # su propio aviso y el error se sigue viendo por consola.
+            printf '%s %s\n' "$sello" "$linea" 2>/dev/null >> "$log_file" || true
+        done <<< "$mensaje"
+    fi
+
+    if [ "$opt_syslog" = "true" ] && command -v logger >/dev/null 2>&1; then
+        printf '%s\n' "$mensaje" | logger -t "$LOG_TAG" -p user.info 2>/dev/null || true
+    fi
+
+    if [ "$canal" = "error" ]; then
+        printf '%s\n' "$mensaje" >&2
+    else
+        printf '%s\n' "$mensaje"
+    fi
+
+    return 0
 }
 
 salir_error() {
-    echo "ERROR: $1" >&2
+    log error "ERROR: $1"
     exit 1
+}
+
+# Marcador de cierre: se dispara por el trap de EXIT, incluidos los abortes.
+log_fin() {
+    local codigo=$?
+    local duracion="?"
+    if [ -n "$LOG_SELLO_INICIO" ]; then
+        duracion="$(( $(date +%s) - LOG_EPOCH_INICIO ))s"
+    fi
+    log salida "=== FIN | resultado=$codigo | duracion=$duracion | copiados=${copiados:-0} enviados=${enviados:-0} omitidos=${omitidos:-0} fallidos=${fallidos:-0} | $ftp_user@$ftp_host:$ftp_port/$remote_dir ==="
 }
 
 requerir_comando() {
     command -v "$1" >/dev/null 2>&1 || salir_error "No se encontro el comando requerido: $1"
+}
+
+recortar() {
+    local valor="$1"
+    valor="${valor#"${valor%%[![:space:]]*}"}"
+    valor="${valor%"${valor##*[![:space:]]}"}"
+    printf '%s' "$valor"
+}
+
+es_verdadero() {
+    case "${1,,}" in
+        1|true|t|yes|y|si|s|on) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 normalizar_remote_dir() {
@@ -70,6 +262,418 @@ aplicar_plantilla() {
     echo "$salida"
 }
 
+escapar_curl() {
+    local valor="$1"
+    valor="${valor//\\/\\\\}"
+    valor="${valor//\"/\\\"}"
+    printf '%s' "$valor"
+}
+
+# curl rechaza URLs con espacios o caracteres especiales, asi que la ruta
+# remota se percent-codifica byte a byte (soporta UTF-8 en los nombres).
+codificar_url() (
+    export LC_ALL=C
+    local texto="$1"
+    local salida=""
+    local i
+    local c
+    local largo=${#texto}
+
+    for (( i = 0; i < largo; i++ )); do
+        c="${texto:i:1}"
+        case "$c" in
+            [A-Za-z0-9._~-]|/) salida+="$c" ;;
+            *) salida+=$(printf '%%%02X' "'$c") ;;
+        esac
+    done
+
+    printf '%s' "$salida"
+)
+
+# Opciones de registro: se resuelven antes que las demas para que las trazas
+# de configuracion queden escritas en el log.
+opciones_log=(
+    "--log-file|log_file|LOG_FILE"
+    "--connect-timeout|curl_connect_timeout|CONNECT_TIMEOUT"
+    "--speed-time|curl_speed_time|SPEED_TIME"
+)
+opciones_log_bandera=(
+    "--syslog|opt_syslog|SYSLOG"
+)
+
+# Opciones con valor: --flag|variable_interna|sufijo_env
+opciones_valor=(
+    "--source-dir|source_dir|SOURCE_DIR"
+    "--pattern|patterns|PATTERN"
+    "--host|ftp_host|HOST"
+    "--port|ftp_port|PORT"
+    "--protocol|ftp_protocol|PROTOCOL"
+    "--user|ftp_user|USER"
+    "--password|ftp_password|PASSWORD"
+    "--remote-dir|remote_dir|REMOTE_DIR"
+    "--rename-template|rename_template|RENAME_TEMPLATE"
+    "--tmp-dir|tmp_dir|TMP_DIR"
+)
+
+# Banderas: --flag|variable_interna|sufijo_env
+opciones_bandera=(
+    "--overwrite|opt_overwrite|OVERWRITE"
+    "--insecure|opt_insecure|INSECURE"
+    "--dry-run|opt_dry_run|DRY_RUN"
+    "--help|opt_help|HELP"
+)
+
+source_dir=""
+patterns=""
+ftp_host=""
+ftp_port="21"
+ftp_protocol="ftp"
+ftp_user=""
+ftp_password=""
+remote_dir=""
+rename_template=""
+tmp_dir=""
+env_file=""
+config_prefix=""
+log_file=""
+curl_connect_timeout="30"
+curl_speed_time="60"
+opt_syslog="false"
+opt_overwrite="false"
+opt_insecure="false"
+opt_dry_run="false"
+opt_help="false"
+
+declare -A opcion_cli=()
+declare -A CONFIG_ENV=()
+
+variable_de_flag() {
+    local flag="$1"
+    local entrada
+    for entrada in "${opciones_valor[@]}" "${opciones_bandera[@]}" \
+                  "${opciones_log[@]}" "${opciones_log_bandera[@]}"; do
+        if [ "${entrada%%|*}" = "$flag" ]; then
+            cut -d'|' -f2 <<< "$entrada"
+            return 0
+        fi
+    done
+    return 1
+}
+
+es_opcion_con_valor() {
+    local flag="$1"
+    local entrada
+    for entrada in "${opciones_valor[@]}" "${opciones_log[@]}"; do
+        if [ "${entrada%%|*}" = "$flag" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+es_flag_negado() {
+    case "$1" in
+        --no-*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Primera pasada: solo argumentos de consola, para registrar que fue explicito.
+asignar_opcion() {
+    local flag="$1"
+    local valor="$2"
+    local variable
+    local negada="false"
+
+    if es_flag_negado "$flag"; then
+        negada="true"
+        flag="--${flag#--no-}"
+    fi
+
+    variable="$(variable_de_flag "$flag")" || return 1
+
+    if [ "$negada" = "true" ]; then
+        es_opcion_con_valor "$flag" && return 1
+        declare -g "$variable=false"
+    else
+        declare -g "$variable=$valor"
+    fi
+    opcion_cli["$flag"]=1
+}
+
+while [ "$#" -gt 0 ]; do
+    argumento="$1"
+    valor_inline=""
+    tiene_inline="false"
+    if [[ "$argumento" == --*=* ]]; then
+        valor_inline="${argumento#*=}"
+        argumento="${argumento%%=*}"
+        tiene_inline="true"
+    fi
+
+    case "$argumento" in
+        --config|--env-file)
+            if [ "$tiene_inline" = "true" ]; then
+                case "$argumento" in
+                    --config) config_prefix="$valor_inline" ;;
+                    --env-file) env_file="$valor_inline" ;;
+                esac
+                shift
+            else
+                [ "$#" -ge 2 ] || salir_error "$argumento requiere un valor"
+                case "$argumento" in
+                    --config) config_prefix="$2" ;;
+                    --env-file) env_file="$2" ;;
+                esac
+                shift 2
+            fi
+            ;;
+        -h)
+            mostrar_uso
+            exit 0
+            ;;
+        --*)
+            flag_efectivo="$argumento"
+            es_negada="false"
+            if es_flag_negado "$argumento"; then
+                flag_efectivo="--${argumento#--no-}"
+                es_negada="true"
+            fi
+            variable_de_flag "$flag_efectivo" >/dev/null || salir_error "Parametro no reconocido: $argumento"
+            if es_opcion_con_valor "$flag_efectivo"; then
+                [ "$es_negada" = "true" ] && salir_error "Parametro no reconocido: $argumento"
+                if [ "$tiene_inline" = "true" ]; then
+                    asignar_opcion "$argumento" "$valor_inline"
+                    shift
+                else
+                    [ "$#" -ge 2 ] || salir_error "$flag_efectivo requiere un valor"
+                    asignar_opcion "$argumento" "$2"
+                    shift 2
+                fi
+            else
+                asignar_opcion "$argumento" "true"
+                shift
+            fi
+            ;;
+        *)
+            salir_error "Parametro no reconocido: $argumento"
+            ;;
+    esac
+done
+
+# Un --log-file invalido se detecta aqui, antes de que log() intente escribir.
+# No se usa touch para comprobar permisos: el kernel deja actualizar la
+# fecha de un archivo propio aunque no tenga permiso de escritura.
+validar_log_file() {
+    [ -n "$log_file" ] || return 0
+    local directorio_log
+    directorio_log="$(dirname "$log_file")"
+
+    if [ -e "$log_file" ]; then
+        [ -f "$log_file" ] || \
+            salir_error "El log no es un archivo regular: $log_file (revisar --log-file)"
+        [ -w "$log_file" ] || \
+            salir_error "No se puede escribir en el log: $log_file (sin permiso de escritura)"
+    else
+        [ -d "$directorio_log" ] || \
+            salir_error "El directorio del log no existe: $directorio_log (revisar --log-file)"
+        [ -w "$directorio_log" ] || \
+            salir_error "No se puede crear el log en $directorio_log (sin permiso de escritura)"
+    fi
+}
+
+validar_log_file
+
+[ "$opt_help" = "true" ] && mostrar_uso && exit 0
+
+# Carga del .env: solo lineas KEY=VALUE, sin ejecutar el archivo.
+cargar_env_archivo() {
+    local archivo="$1"
+    local linea clave valor
+
+    while IFS= read -r linea || [ -n "$linea" ]; do
+        linea="$(recortar "$linea")"
+        case "$linea" in
+            ''|'#'*) continue ;;
+            export[[:space:]]*) linea="$(recortar "${linea#export}")" ;;
+        esac
+        [[ "$linea" == *=* ]] || continue
+
+        clave="$(recortar "${linea%%=*}")"
+        [[ "$clave" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        valor="${linea#*=}"
+
+        if [[ "$valor" == \"*\" && ${#valor} -ge 2 ]]; then
+            valor="${valor:1:${#valor}-2}"
+            valor="${valor//\\\"/\"}"
+            valor="${valor//\\\\/\\}"
+        elif [[ "$valor" == \'*\' && ${#valor} -ge 2 ]]; then
+            valor="${valor:1:${#valor}-2}"
+        else
+            valor="$(recortar "${valor%%#*}")"
+        fi
+
+        CONFIG_ENV["$clave"]="$valor"
+    done < "$archivo"
+}
+
+buscar_en_config() {
+    # $1 = prefijo, $2 = sufijo.
+    # Deja el valor en CONFIG_VALOR y la clave de origen en CONFIG_ORIGEN.
+    local prefijo="$1"
+    local sufijo="$2"
+    local clave="${prefijo}_${sufijo}"
+
+    CONFIG_VALOR=""
+    CONFIG_ORIGEN=""
+
+    if [[ -v $clave ]]; then
+        CONFIG_VALOR="${!clave}"
+        CONFIG_ORIGEN="$clave"
+        return 0
+    fi
+    if [[ -v CONFIG_ENV[$clave] ]]; then
+        CONFIG_VALOR="${CONFIG_ENV[$clave]}"
+        CONFIG_ORIGEN="$clave"
+        return 0
+    fi
+
+    return 1
+}
+
+if [ -n "$config_prefix" ]; then
+    config_prefix="$(recortar "$config_prefix")"
+    config_prefix="${config_prefix^^}"
+    [[ "$config_prefix" =~ ^[A-Z0-9_]+$ ]] || salir_error "--config solo admite letras, digitos y guion bajo: $config_prefix"
+    [ -n "$env_file" ] || env_file="$ENV_FILE_POR_DEFECTO"
+
+    [ -f "$env_file" ] || salir_error "No se encontro el archivo de configuracion: $env_file"
+    [ -r "$env_file" ] || salir_error "No se puede leer el archivo de configuracion: $env_file"
+
+    cargar_env_archivo "$env_file"
+fi
+
+# Segunda pasada: completamos con la configuracion solo lo que no vino por consola.
+aplicar_opciones_valor() {
+    local entrada flag variable sufijo
+
+    for entrada in "${opciones_valor[@]}"; do
+        flag="${entrada%%|*}"
+        variable="$(cut -d'|' -f2 <<< "$entrada")"
+        sufijo="$(cut -d'|' -f3 <<< "$entrada")"
+
+        [ -n "${opcion_cli[$flag]:-}" ] && continue
+        [ -n "$config_prefix" ] || continue
+
+        if buscar_en_config "$config_prefix" "$sufijo"; then
+            declare -g "$variable=$CONFIG_VALOR"
+            if [ "$variable" = "ftp_password" ]; then
+                log salida "CONFIG: $CONFIG_ORIGEN -> $flag (valor oculto)"
+            else
+                log salida "CONFIG: $CONFIG_ORIGEN -> $flag = $CONFIG_VALOR"
+            fi
+        fi
+    done
+}
+
+aplicar_opciones_bandera() {
+    local entrada flag variable sufijo
+
+    for entrada in "${opciones_bandera[@]}"; do
+        flag="${entrada%%|*}"
+        variable="$(cut -d'|' -f2 <<< "$entrada")"
+        sufijo="$(cut -d'|' -f3 <<< "$entrada")"
+
+        [ -n "${opcion_cli[$flag]:-}" ] && continue
+        [ -n "$config_prefix" ] || continue
+
+        if buscar_en_config "$config_prefix" "$sufijo" && es_verdadero "$CONFIG_VALOR"; then
+            declare -g "$variable=true"
+            log salida "CONFIG: $CONFIG_ORIGEN -> $flag = true"
+        fi
+    done
+}
+
+aplicar_opciones_log() {
+    local entrada flag variable sufijo
+
+    for entrada in "${opciones_log[@]}"; do
+        flag="${entrada%%|*}"
+        variable="$(cut -d'|' -f2 <<< "$entrada")"
+        sufijo="$(cut -d'|' -f3 <<< "$entrada")"
+
+        [ -n "${opcion_cli[$flag]:-}" ] && continue
+        [ -n "$config_prefix" ] || continue
+
+        if buscar_en_config "$config_prefix" "$sufijo"; then
+            declare -g "$variable=$CONFIG_VALOR"
+            # Valida antes de trazar: si la ruta del .env es invalida, el error
+            # sale por consola y no por un log que no se puede abrir.
+            [ "$variable" = "log_file" ] && validar_log_file
+            log salida "CONFIG: $CONFIG_ORIGEN -> $flag = $CONFIG_VALOR"
+        fi
+    done
+
+    for entrada in "${opciones_log_bandera[@]}"; do
+        flag="${entrada%%|*}"
+        variable="$(cut -d'|' -f2 <<< "$entrada")"
+        sufijo="$(cut -d'|' -f3 <<< "$entrada")"
+
+        [ -n "${opcion_cli[$flag]:-}" ] && continue
+        [ -n "$config_prefix" ] || continue
+
+        if buscar_en_config "$config_prefix" "$sufijo" && es_verdadero "$CONFIG_VALOR"; then
+            declare -g "$variable=true"
+            log salida "CONFIG: $CONFIG_ORIGEN -> $flag = true"
+        fi
+    done
+}
+
+# El marcador de inicio va despues de resolver el resto, para que el destino
+# y el patron aparezcan completos en el log.
+iniciar_log() {
+    [ -n "$log_file" ] || [ "$opt_syslog" = "true" ] || return 0
+
+    local modo="consola"
+    [ "$opt_dry_run" = "true" ] && modo="dry-run"
+
+    LOG_EPOCH_INICIO="$(date +%s)"
+    LOG_SELLO_INICIO="$(date '+%F %T')"
+    log salida "=== INICIO | $LOG_SELLO_INICIO | modo=$modo | pid=$$ | origen=$source_dir | destino=$ftp_user@$ftp_host:$ftp_port/$remote_dir | patron=$patterns ==="
+    trap log_fin EXIT
+}
+
+aplicar_opciones_log
+aplicar_opciones_valor
+aplicar_opciones_bandera
+
+[ "$opt_help" = "true" ] && mostrar_uso && exit 0
+
+# Se normaliza antes de iniciar el log para que el destino del marcador
+# INICIO coincida con el del marcador FIN.
+remote_dir=$(normalizar_remote_dir "$remote_dir")
+iniciar_log
+
+# --rename-template es opcional: sin el, el archivo conserva el nombre del origen.
+[ -n "$rename_template" ] || rename_template="%name"
+
+[ -n "$source_dir" ] || salir_error "Falta --source-dir (o <PREFIJO>_SOURCE_DIR en el .env)"
+[ -n "$patterns" ] || salir_error "Falta --pattern (o <PREFIJO>_PATTERN en el .env)"
+[ -n "$ftp_host" ] || salir_error "Falta --host (o <PREFIJO>_HOST en el .env)"
+[ -n "$ftp_user" ] || salir_error "Falta --user (o <PREFIJO>_USER en el .env)"
+[ -n "$ftp_password" ] || salir_error "Falta --password (o <PREFIJO>_PASSWORD en el .env)"
+[ -n "$remote_dir" ] || salir_error "Falta --remote-dir (o <PREFIJO>_REMOTE_DIR en el .env)"
+[ -d "$source_dir" ] || salir_error "No existe la ruta local: $source_dir"
+[[ "$ftp_port" =~ ^[0-9]+$ ]] || salir_error "--port debe ser numerico"
+[[ "$ftp_protocol" =~ ^(ftp|ftps|sftp)$ ]] || salir_error "--protocol debe ser ftp, ftps o sftp"
+[[ "$curl_connect_timeout" =~ ^[0-9]+$ ]] || salir_error "--connect-timeout debe ser numerico"
+[[ "$curl_speed_time" =~ ^[0-9]+$ ]] || salir_error "--speed-time debe ser numerico"
+
+requerir_comando curl
+
+archivos=()
+archivos_no_encontrados=()
+
 agregar_archivos_por_patron() {
     local patron="$1"
     local archivo
@@ -89,118 +693,22 @@ agregar_archivos_por_patron() {
     fi
 }
 
-source_dir=""
-patterns=""
-ftp_host=""
-ftp_port="21"
-ftp_protocol="ftp"
-ftp_user=""
-ftp_password=""
-remote_dir=""
-rename_template=""
-tmp_dir=""
-dry_run="false"
-curl_insecure="false"
-overwrite="false"
-
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --source-dir)
-            source_dir="$2"
-            shift 2
-            ;;
-        --pattern)
-            patterns="$2"
-            shift 2
-            ;;
-        --host)
-            ftp_host="$2"
-            shift 2
-            ;;
-        --port)
-            ftp_port="$2"
-            shift 2
-            ;;
-        --protocol)
-            ftp_protocol="$2"
-            shift 2
-            ;;
-        --user)
-            ftp_user="$2"
-            shift 2
-            ;;
-        --password)
-            ftp_password="$2"
-            shift 2
-            ;;
-        --remote-dir)
-            remote_dir="$2"
-            shift 2
-            ;;
-        --rename-template)
-            rename_template="$2"
-            shift 2
-            ;;
-        --tmp-dir)
-            tmp_dir="$2"
-            shift 2
-            ;;
-        --overwrite)
-            overwrite="true"
-            shift
-            ;;
-        --insecure)
-            curl_insecure="true"
-            shift
-            ;;
-        --dry-run)
-            dry_run="true"
-            shift
-            ;;
-        --help|-h)
-            mostrar_uso
-            exit 0
-            ;;
-        *)
-            salir_error "Parametro no reconocido: $1"
-            ;;
-    esac
-done
-
-[ -n "$source_dir" ] || salir_error "Falta --source-dir"
-[ -n "$patterns" ] || salir_error "Falta --pattern"
-[ -n "$ftp_host" ] || salir_error "Falta --host"
-[ -n "$ftp_user" ] || salir_error "Falta --user"
-[ -n "$ftp_password" ] || salir_error "Falta --password"
-[ -n "$remote_dir" ] || salir_error "Falta --remote-dir"
-[ -n "$rename_template" ] || salir_error "Falta --rename-template"
-[ -d "$source_dir" ] || salir_error "No existe la ruta local: $source_dir"
-[[ "$ftp_port" =~ ^[0-9]+$ ]] || salir_error "--port debe ser numerico"
-[[ "$ftp_protocol" =~ ^(ftp|sftp)$ ]] || salir_error "--protocol debe ser ftp o sftp"
-
-requerir_comando curl
-
-remote_dir=$(normalizar_remote_dir "$remote_dir")
-archivos=()
-archivos_no_encontrados=()
-
 IFS=',' read -ra lista_patrones <<< "$patterns"
 for patron in "${lista_patrones[@]}"; do
-    patron="$(echo "$patron" | xargs)"
+    patron="$(recortar "$patron")"
     [ -n "$patron" ] && agregar_archivos_por_patron "$patron"
 done
 
 for archivo_no_encontrado in "${archivos_no_encontrados[@]}"; do
-    echo "NO ENCONTRADO: no existe en la ruta de origen $archivo_no_encontrado"
+    log salida "NO ENCONTRADO: no existe en la ruta de origen $archivo_no_encontrado"
 done
 
 if [ "${#archivos[@]}" -eq 0 ]; then
-    echo "No se encontraron archivos XML para los patrones indicados."
+    log salida "No se encontraron archivos XML para los patrones indicados."
     exit 0
 fi
 
-IFS=$'\n' archivos=($(printf '%s\n' "${archivos[@]}" | sort -u))
-unset IFS
+mapfile -t archivos < <(printf '%s\n' "${archivos[@]}" | sort -u)
 
 if [ -z "$tmp_dir" ]; then
     tmp_dir="$source_dir"
@@ -211,6 +719,7 @@ fi
 copiados=0
 enviados=0
 omitidos=0
+fallidos=0
 
 for indice in "${!archivos[@]}"; do
     archivo_origen="${archivos[$indice]}"
@@ -218,37 +727,86 @@ for indice in "${!archivos[@]}"; do
     seq=$((indice + 1))
     nombre_destino=$(aplicar_plantilla "$rename_template" "$nombre_original" "$seq")
     archivo_temporal="$tmp_dir/$nombre_destino"
-    ftp_url="$ftp_protocol://$ftp_host:$ftp_port/$remote_dir/$nombre_destino"
+    ruta_remota="$remote_dir/$nombre_destino"
+    ftp_url="$ftp_protocol://$ftp_host:$ftp_port/$(codificar_url "$ruta_remota")"
+    ftp_url_legible="$ftp_protocol://$ftp_host:$ftp_port/$ruta_remota"
 
-    if [ "$dry_run" = "true" ]; then
-        echo "COPIARIA: $archivo_origen -> $archivo_temporal"
-        echo "ENVIARIA: $archivo_temporal -> $ftp_url"
+    # Sin renombrado el archivo de trabajo es el mismo origen, asi que no hay
+    # copia previa que sirva de marca de "ya enviado".
+    renombrado="false"
+    if [ "$archivo_origen" != "$archivo_temporal" ]; then
+        renombrado="true"
+    fi
+
+    if [ "$opt_dry_run" = "true" ]; then
+        if [ "$renombrado" = "true" ]; then
+            log salida "COPIARIA: $archivo_origen -> $archivo_temporal"
+        fi
+        log salida "ENVIARIA: $archivo_temporal -> $ftp_url_legible"
         continue
     fi
 
-    if [ "$overwrite" != "true" ] && [ -f "$archivo_temporal" ]; then
-        echo "OMITIDO: ya existe la copia local renombrada $archivo_temporal"
+    if [ "$opt_overwrite" != "true" ] && [ "$renombrado" = "true" ] && [ -f "$archivo_temporal" ]; then
+        log salida "OMITIDO: ya existe la copia local renombrada $archivo_temporal"
         omitidos=$((omitidos + 1))
         continue
     fi
 
-    if [ "$archivo_origen" != "$archivo_temporal" ]; then
-        cp "$archivo_origen" "$archivo_temporal" || salir_error "No se pudo copiar $archivo_origen a $archivo_temporal"
+    if [ "$renombrado" = "true" ]; then
+        if ! cp "$archivo_origen" "$archivo_temporal"; then
+            log error "ERROR: No se pudo copiar $archivo_origen a $archivo_temporal"
+            fallidos=$((fallidos + 1))
+            continue
+        fi
         copiados=$((copiados + 1))
     fi
 
-    curl_args=(--fail --silent --show-error --ftp-create-dirs --user "$ftp_user:$ftp_password" -T "$archivo_temporal")
-    if [ "$curl_insecure" = "true" ]; then
+    # La clave viaja por stdin para no quedar expuesta en la linea de comandos.
+    curl_config="user = \"$(escapar_curl "$ftp_user"):$(escapar_curl "$ftp_password")\""
+    curl_args=(--fail --silent --show-error -K - -T "$archivo_temporal")
+    # --ftp-create-dirs solo existe para FTP. Con SFTP, curl entra en un bucle
+    # infinito de "Creating directory" sobre la misma ruta, que con --silent no
+    # muestra nada: el script queda colgado sin mensaje. El remoto debe existir.
+    if [ "$ftp_protocol" != "sftp" ]; then
+        curl_args+=(--ftp-create-dirs)
+    fi
+
+    if [ "$opt_insecure" = "true" ]; then
         curl_args+=(--insecure)
     fi
 
-    curl "${curl_args[@]}" "$ftp_url" || salir_error "No se pudo enviar $archivo_temporal a $ftp_url"
+    # --silent evita el progreso; --show-error deja el diagnostico de curl, que
+    # se captura para que quede en el log y no se pierda al cerrar la consola.
+    # Los timeouts son obligatorios: sin ellos, un servidor que acepta la
+    # conexion y no responde deja el script colgado indefinidamente.
+    # Un fallo aqui no detiene el lote: se anota y se sigue con el siguiente.
+    if ! salida_curl=$(printf '%s\n' "$curl_config" | \
+        curl --connect-timeout "$curl_connect_timeout" \
+             --speed-limit 1 --speed-time "$curl_speed_time" \
+             "${curl_args[@]}" "$ftp_url" 2>&1); then
+        # curl ya antepone su propio "curl: "; se registra tal cual.
+        [ -n "$salida_curl" ] && log error "$salida_curl"
+        log error "ERROR: No se pudo enviar $archivo_temporal a $ftp_url_legible"
+        fallidos=$((fallidos + 1))
+        # Se borra la copia de trabajo para que un reintento no la confunda con
+        # la marca de "ya enviado" y lo salte para siempre. Solo cuando es una
+        # copia: sin renombrado archivo_temporal es el propio origen y
+        # borrarlo destruiria el archivo del usuario.
+        if [ "$renombrado" = "true" ]; then
+            rm -f "$archivo_temporal" && log salida "LIMPIO: copia de trabajo eliminada $archivo_temporal"
+        fi
+        continue
+    fi
     enviados=$((enviados + 1))
-    echo "ENVIADO: $archivo_origen -> $ftp_url"
+    log salida "ENVIADO: $archivo_origen -> $ftp_url_legible"
 done
 
-if [ "$dry_run" = "true" ]; then
-    echo "Resumen: coincidencias=${#archivos[@]} enviados=0"
+if [ "$opt_dry_run" = "true" ]; then
+    log salida "Resumen: coincidencias=${#archivos[@]} enviados=0 fallidos=0"
 else
-    echo "Resumen: copiados=$copiados enviados=$enviados omitidos=$omitidos"
+    log salida "Resumen: copiados=$copiados enviados=$enviados omitidos=$omitidos fallidos=$fallidos"
 fi
+
+# El lote completo se procesa aunque algunos fallen, pero el codigo de salida
+# distinto de cero avisa a cron o a quien invoque que hubo perdidas.
+[ "$fallidos" -eq 0 ] || exit 1
