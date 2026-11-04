@@ -1,0 +1,510 @@
+#!/bin/bash
+#
+# siba-usuario-sudo-ssh.sh
+#
+# Descripcion:
+#   Crea un usuario Linux con las siguientes caracteristicas:
+#     - Pertenece al grupo administrativo (sudo en Debian/Ubuntu, wheel en RHEL/CentOS).
+#     - Puede ejecutar sudo sin contrasena (NOPASSWD) mediante /etc/sudoers.d.
+#     - Solo puede autenticarse por SSH con llave publica (sin contrasena por SSH).
+#   Con la opcion --delete elimina el usuario y toda la configuracion asociada.
+#
+# Uso:
+#   sudo ./siba-usuario-sudo-ssh.sh <usuario> [--clave <clave>] [--ssh-pub-key <ruta>]
+#   sudo ./siba-usuario-sudo-ssh.sh <usuario> --delete
+#
+# Opciones:
+#   --clave <clave>        Asigna la contrasena del usuario (uso local/su, NO para SSH).
+#   --ssh-pub-key <ruta>   Ruta del archivo con la(s) llave(s) publica(s) SSH a autorizar.
+#   --delete               Elimina el usuario, su home y la configuracion generada.
+#   -h, --help             Muestra esta ayuda.
+#
+# Ejemplos:
+#   sudo ./siba-usuario-sudo-ssh.sh sibaops --clave 'MiClaveSegura' \
+#        --ssh-pub-key /home/mauricio/.ssh/id_ed25519.pub
+#   sudo ./siba-usuario-sudo-ssh.sh sibaops --delete
+#
+# Notas:
+#   - La clave pasada con --clave queda visible en la lista de procesos (ps).
+#     En produccion es preferible no usarla y dejar la cuenta bloqueada.
+#   - El nombre de usuario solo admite minusculas, digitos, guion y guion bajo,
+#     y no puede iniciar con digito (restriccion estandar de useradd).
+#
+
+set -euo pipefail
+
+PROG="$(basename "$0")"
+MARCADOR="siba-usuario-sudo-ssh"
+SUDOERS_DIR="/etc/sudoers.d"
+SSHD_CONFIG="/etc/ssh/sshd_config"
+SSHD_DROPIN_DIR="/etc/ssh/sshd_config.d"
+
+USUARIO=""
+CLAVE=""
+LLAVE_PUBLICA=""
+ACCION="crear"
+
+msg()   { echo "[INFO]  $*"; }
+aviso() { echo "[AVISO] $*" >&2; }
+error() { echo "[ERROR] $*" >&2; }
+morir() { error "$*"; exit 1; }
+
+uso() {
+  cat <<EOF
+Uso: sudo $PROG <usuario> [opciones]
+
+Opciones:
+  --clave <clave>        Asigna la contrasena del usuario (uso local, no SSH).
+  --ssh-pub-key <ruta>   Archivo con la llave publica SSH a autorizar.
+  --delete               Elimina el usuario y su configuracion.
+  -h, --help             Muestra esta ayuda.
+
+Ejemplos:
+  sudo $PROG sibaops --clave 'MiClaveSegura' --ssh-pub-key /tmp/id_ed25519.pub
+  sudo $PROG sibaops --delete
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Utilidades generales
+# ---------------------------------------------------------------------------
+requiere_root() {
+  [ "$(id -u)" -eq 0 ] || morir "Este script debe ejecutarse como root (usa sudo)."
+}
+
+validar_usuario() {
+  [ -n "$USUARIO" ] || { uso >&2; morir "Debes indicar el nombre de usuario."; }
+  if ! [[ "$USUARIO" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+    morir "Nombre de usuario invalido: '$USUARIO'. Usa minusculas, digitos, '-' o '_' y no inicies con digito."
+  fi
+}
+
+usuario_existe() {
+  getent passwd "$USUARIO" >/dev/null 2>&1
+}
+
+home_de_usuario() {
+  getent passwd "$USUARIO" | cut -d: -f6
+}
+
+validar_clave() {
+  [ -n "$CLAVE" ] || return 0
+  if [[ "$CLAVE" == *:* ]] || [[ "$CLAVE" == *$'\n'* ]]; then
+    morir "La clave no puede contener ':' ni saltos de linea."
+  fi
+}
+
+validar_llave_publica() {
+  [ -n "$LLAVE_PUBLICA" ] || return 0
+  [ -e "$LLAVE_PUBLICA" ] || morir "La llave publica no existe: $LLAVE_PUBLICA"
+  [ -f "$LLAVE_PUBLICA" ] || morir "La ruta indicada no es un archivo: $LLAVE_PUBLICA"
+  [ -r "$LLAVE_PUBLICA" ] || morir "No hay permiso de lectura sobre: $LLAVE_PUBLICA"
+  grep -Eq '^[[:space:]]*(ssh-|ecdsa-|sk-)' "$LLAVE_PUBLICA" || \
+    morir "El archivo '$LLAVE_PUBLICA' no parece contener una llave publica SSH valida."
+}
+
+# Validaciones previas a cualquier cambio en el sistema.
+verificaciones_previas() {
+  validar_clave
+  validar_llave_publica
+}
+
+detectar_grupo_sudo() {
+  local grupo
+  for grupo in sudo wheel; do
+    if getent group "$grupo" >/dev/null 2>&1; then
+      echo "$grupo"
+      return 0
+    fi
+  done
+
+  # Ninguno existe: se crea el grupo 'sudo' para cumplir el requisito.
+  if groupadd sudo 2>/dev/null && getent group sudo >/dev/null 2>&1; then
+    echo "sudo"
+    return 0
+  fi
+
+  return 1
+}
+
+sshd_bin() {
+  if command -v sshd >/dev/null 2>&1; then
+    command -v sshd
+  elif [ -x /usr/sbin/sshd ]; then
+    echo /usr/sbin/sshd
+  fi
+}
+
+sshd_valido() {
+  local bin salida
+  bin="$(sshd_bin)"
+  # Si no hay binario de sshd (p. ej. contenedor sin servidor SSH), no se valida.
+  [ -n "$bin" ] || return 0
+  # sshd -t requiere el directorio de separacion de privilegios (lo crean
+  # los scripts de inicio; en contenedores puede no existir).
+  [ -d /run/sshd ] || mkdir -p /run/sshd 2>/dev/null || true
+
+  if salida="$("$bin" -t 2>&1)"; then
+    return 0
+  fi
+
+  # En instalaciones nuevas sin host keys, sshd -t aborta despues de parsear
+  # la configuracion: eso no indica un error de sintaxis.
+  if grep -q 'no hostkeys available' <<< "$salida"; then
+    aviso "sshd no tiene host keys generadas (ssh-keygen -A); se omite esa validacion."
+    return 0
+  fi
+
+  printf '%s\n' "$salida" >&2
+  return 1
+}
+
+recargar_sshd() {
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet ssh 2>/dev/null && systemctl reload ssh 2>/dev/null; then
+      msg "sshd recargado (servicio ssh)."
+      return 0
+    fi
+    if systemctl is-active --quiet sshd 2>/dev/null && systemctl reload sshd 2>/dev/null; then
+      msg "sshd recargado (servicio sshd)."
+      return 0
+    fi
+  fi
+
+  if command -v service >/dev/null 2>&1; then
+    if service ssh reload >/dev/null 2>&1 || service sshd reload >/dev/null 2>&1; then
+      msg "sshd recargado (service)."
+      return 0
+    fi
+  fi
+
+  aviso "No se pudo recargar sshd automaticamente. Reinicialo/recargalo manualmente."
+}
+
+# ---------------------------------------------------------------------------
+# Creacion del usuario
+# ---------------------------------------------------------------------------
+configurar_sudoers() {
+  local archivo="$SUDOERS_DIR/$MARCADOR-$USUARIO"
+  local temporal
+  local visudo_bin
+
+  visudo_bin="$(command -v visudo 2>/dev/null || true)"
+  if [ -z "$visudo_bin" ] && [ -x /usr/sbin/visudo ]; then
+    visudo_bin=/usr/sbin/visudo
+  fi
+  [ -n "$visudo_bin" ] || morir "No se encontro 'visudo'; no se puede validar la configuracion de sudo."
+
+  # Aviso si /etc/sudoers no incluye el directorio de drop-ins.
+  if [ -f /etc/sudoers ] && ! grep -Eq '^[[:space:]]*[@#]?includedir[[:space:]]+/etc/sudoers\.d' /etc/sudoers; then
+    aviso "/etc/sudoers no incluye /etc/sudoers.d; el archivo $archivo podria no aplicarse."
+  fi
+
+  temporal="$(mktemp)"
+  {
+    echo "# Generado por $PROG el $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "# sudo sin contrasena para el usuario $USUARIO"
+    echo "$USUARIO ALL=(ALL:ALL) NOPASSWD: ALL"
+  } > "$temporal"
+  chmod 0440 "$temporal"
+
+  if ! "$visudo_bin" -cqf "$temporal"; then
+    rm -f "$temporal"
+    morir "El archivo de sudoers generado no es valido. No se aplicaron cambios."
+  fi
+
+  install -m 0440 -o root -g root "$temporal" "$archivo"
+  rm -f "$temporal"
+  restorecon "$archivo" >/dev/null 2>&1 || true
+
+  msg "sudo sin contrasena configurado en $archivo."
+}
+
+bloque_sshd() {
+  cat <<EOF
+# BEGIN $MARCADOR: $USUARIO
+# Solo autenticacion por llave publica para el usuario $USUARIO.
+# Generado por $PROG el $(date '+%Y-%m-%d %H:%M:%S')
+Match User $USUARIO
+    PubkeyAuthentication yes
+    AuthenticationMethods publickey
+    PasswordAuthentication no
+# END $MARCADOR: $USUARIO
+EOF
+}
+
+soporta_dropin_sshd() {
+  [ -d "$SSHD_DROPIN_DIR" ] && \
+    grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' "$SSHD_CONFIG" 2>/dev/null
+}
+
+eliminar_bloque_sshd_config() {
+  if grep -qF "# BEGIN $MARCADOR: $USUARIO" "$SSHD_CONFIG" 2>/dev/null; then
+    sed -i "\|^# BEGIN $MARCADOR: $USUARIO\$|,\|^# END $MARCADOR: $USUARIO\$|d" "$SSHD_CONFIG"
+    return 0
+  fi
+  return 1
+}
+
+configurar_sshd() {
+  [ -f "$SSHD_CONFIG" ] || morir "No se encontro $SSHD_CONFIG. OpenSSH server esta instalado?"
+
+  if soporta_dropin_sshd; then
+    # El prefijo '00-' hace que este archivo se procese antes que otros
+    # drop-ins (p. ej. 50-cloud-init.conf). En sshd gana el primer valor
+    # encontrado, asi que nuestra restriccion debe ir primero.
+    local archivo="$SSHD_DROPIN_DIR/00-$MARCADOR-$USUARIO.conf"
+    local previo=""
+
+    if [ -f "$archivo" ]; then
+      previo="$(cat "$archivo")"
+    fi
+
+    bloque_sshd > "$archivo"
+
+    if ! sshd_valido; then
+      if [ -n "$previo" ]; then
+        printf '%s\n' "$previo" > "$archivo"
+      else
+        rm -f "$archivo"
+      fi
+      morir "La configuracion generada para sshd no es valida. Se revirtieron los cambios."
+    fi
+
+    restorecon "$archivo" >/dev/null 2>&1 || true
+    msg "Restriccion SSH (solo llave publica) escrita en $archivo."
+  else
+    local respaldo
+    respaldo="$(mktemp)"
+    cp -a "$SSHD_CONFIG" "$respaldo"
+
+    # Idempotencia: elimina un bloque previo si existiera y anexa al final
+    # (un bloque Match debe quedar al final del archivo principal).
+    eliminar_bloque_sshd_config >/dev/null 2>&1 || true
+    printf '\n' >> "$SSHD_CONFIG"
+    bloque_sshd >> "$SSHD_CONFIG"
+
+    if ! sshd_valido; then
+      cp -a "$respaldo" "$SSHD_CONFIG"
+      rm -f "$respaldo"
+      morir "La configuracion generada para sshd no es valida. Se revirtieron los cambios."
+    fi
+
+    rm -f "$respaldo"
+    restorecon "$SSHD_CONFIG" >/dev/null 2>&1 || true
+    msg "Restriccion SSH (solo llave publica) anexada al final de $SSHD_CONFIG."
+  fi
+}
+
+verificar_sshd_efectivo() {
+  local bin salida
+  bin="$(sshd_bin)"
+  [ -n "$bin" ] || return 0
+
+  if ! salida="$("$bin" -T -C "user=$USUARIO,host=localhost,addr=127.0.0.1" 2>/dev/null)"; then
+    aviso "No se pudo verificar la configuracion efectiva de sshd para '$USUARIO'."
+    return 0
+  fi
+
+  if grep -qx 'authenticationmethods publickey' <<< "$salida"; then
+    msg "Verificado: '$USUARIO' solo puede autenticarse por llave publica."
+  else
+    local valor
+    valor="$(grep -m1 '^authenticationmethods' <<< "$salida" || true)"
+    aviso "La configuracion efectiva para '$USUARIO' muestra: ${valor:-desconocida}."
+    aviso "Revisa si algun archivo previo de sshd define AuthenticationMethods o"
+    aviso "PasswordAuthentication de forma global (gana el primer valor encontrado)."
+  fi
+}
+
+configurar_llave_ssh() {
+  [ -n "$LLAVE_PUBLICA" ] || return 0
+  validar_llave_publica
+
+  local home grupo auth agregadas linea
+  home="$(home_de_usuario)"
+  [ -n "$home" ] && [ -d "$home" ] || morir "No se encontro el home del usuario '$USUARIO'."
+
+  grupo="$(id -gn "$USUARIO")"
+  install -d -m 0700 -o "$USUARIO" -g "$grupo" "$home/.ssh"
+
+  auth="$home/.ssh/authorized_keys"
+  touch "$auth"
+  chown "$USUARIO:$grupo" "$auth"
+  chmod 0600 "$auth"
+
+  agregadas=0
+  while IFS= read -r linea || [ -n "$linea" ]; do
+    linea="${linea%$'\r'}"
+    [[ "$linea" =~ ^[[:space:]]*(#|$) ]] && continue
+    if ! grep -qxF -- "$linea" "$auth"; then
+      printf '%s\n' "$linea" >> "$auth"
+      agregadas=$((agregadas + 1))
+    fi
+  done < "$LLAVE_PUBLICA"
+
+  if [ "$agregadas" -gt 0 ]; then
+    msg "Se agregaron $agregadas llave(s) publica(s) en $auth."
+  else
+    msg "La(s) llave(s) ya estaban registradas en $auth."
+  fi
+
+  restorecon -R "$home/.ssh" >/dev/null 2>&1 || true
+}
+
+crear_usuario() {
+  usuario_existe && morir "El usuario '$USUARIO' ya existe. Usa --delete para eliminarlo."
+
+  local grupo_sudo shell
+  grupo_sudo="$(detectar_grupo_sudo)" || morir "No se encontro ni se pudo crear un grupo administrativo (sudo/wheel)."
+
+  shell="/bin/bash"
+  [ -x "$shell" ] || shell="/bin/sh"
+
+  useradd -m -s "$shell" -G "$grupo_sudo" "$USUARIO"
+  msg "Usuario '$USUARIO' creado (grupo administrativo: $grupo_sudo, shell: $shell)."
+
+  if [ -n "$CLAVE" ]; then
+    printf '%s:%s\n' "$USUARIO" "$CLAVE" | chpasswd
+    msg "Clave asignada al usuario '$USUARIO' (para uso local; SSH seguira siendo solo por llave)."
+  else
+    # Sin clave: cuenta bloqueada. Igual se podra entrar por SSH con llave.
+    usermod -L "$USUARIO" 2>/dev/null || true
+    msg "Sin --clave: contrasena bloqueada. El acceso sera unicamente por llave SSH."
+  fi
+
+  configurar_sudoers
+  configurar_llave_ssh
+  configurar_sshd
+  recargar_sshd
+  verificar_sshd_efectivo
+
+  echo
+  msg "Resumen de la creacion:"
+  msg "  Usuario              : $USUARIO"
+  msg "  Grupo administrativo : $grupo_sudo"
+  msg "  sudo sin contrasena  : $SUDOERS_DIR/$MARCADOR-$USUARIO"
+  msg "  Acceso SSH           : solo llave publica"
+  if [ -n "$LLAVE_PUBLICA" ]; then
+    msg "  Llave autorizada     : $LLAVE_PUBLICA"
+  else
+    aviso "No se cargo ninguna llave publica: '$USUARIO' no podra entrar por SSH hasta autorizar una."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Eliminacion del usuario
+# ---------------------------------------------------------------------------
+eliminar_usuario() {
+  local home
+  home="$(home_de_usuario || true)"
+
+  # 1. Quitar sudo sin contrasena.
+  if [ -f "$SUDOERS_DIR/$MARCADOR-$USUARIO" ]; then
+    rm -f "$SUDOERS_DIR/$MARCADOR-$USUARIO"
+    msg "Eliminado $SUDOERS_DIR/$MARCADOR-$USUARIO."
+  fi
+
+  # 2. Quitar restriccion SSH (drop-in y/o bloque en sshd_config).
+  local dropin="$SSHD_DROPIN_DIR/00-$MARCADOR-$USUARIO.conf"
+  local sshd_modificado=0
+  if [ -f "$dropin" ]; then
+    rm -f "$dropin"
+    sshd_modificado=1
+    msg "Eliminado $dropin."
+  fi
+
+  if eliminar_bloque_sshd_config; then
+    sshd_modificado=1
+    msg "Bloque SSH eliminado de $SSHD_CONFIG."
+  fi
+
+  if [ "$sshd_modificado" -eq 1 ]; then
+    if ! sshd_valido; then
+      morir "La configuracion de sshd quedo invalida tras eliminar el bloque. Revisa $SSHD_CONFIG."
+    fi
+  fi
+
+  # 3. Eliminar el usuario (y su home) si existe.
+  if usuario_existe; then
+    if pgrep -u "$USUARIO" >/dev/null 2>&1; then
+      morir "El usuario '$USUARIO' tiene procesos en ejecucion. Cierra sus sesiones e intentalo de nuevo."
+    fi
+
+    if userdel -r "$USUARIO" 2>/dev/null; then
+      msg "Usuario '$USUARIO' eliminado junto con su home${home:+ ($home)}."
+    else
+      userdel "$USUARIO"
+      aviso "Usuario '$USUARIO' eliminado, pero su home${home:+ ($home)} no pudo borrarse por completo."
+    fi
+  else
+    aviso "El usuario '$USUARIO' no existe; solo se limpio la configuracion asociada."
+  fi
+
+  recargar_sshd
+  msg "Eliminacion finalizada para '$USUARIO'."
+}
+
+# ---------------------------------------------------------------------------
+# Punto de entrada
+# ---------------------------------------------------------------------------
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --delete)
+      ACCION="eliminar"
+      shift
+      ;;
+    --clave)
+      [ $# -ge 2 ] || morir "La opcion --clave requiere un valor."
+      CLAVE="$2"
+      shift 2
+      ;;
+    --clave=*)
+      CLAVE="${1#*=}"
+      shift
+      ;;
+    --ssh-pub-key)
+      [ $# -ge 2 ] || morir "La opcion --ssh-pub-key requiere un valor."
+      LLAVE_PUBLICA="$2"
+      shift 2
+      ;;
+    --ssh-pub-key=*)
+      LLAVE_PUBLICA="${1#*=}"
+      shift
+      ;;
+    -h|--help)
+      uso
+      exit 0
+      ;;
+    --)
+      shift
+      while [ $# -gt 0 ]; do
+        [ -z "$USUARIO" ] || morir "Solo se permite un nombre de usuario (sobra: '$1')."
+        USUARIO="$1"
+        shift
+      done
+      ;;
+    -*)
+      uso >&2
+      morir "Opcion desconocida: $1"
+      ;;
+    *)
+      [ -z "$USUARIO" ] || morir "Solo se permite un nombre de usuario (sobra: '$1')."
+      USUARIO="$1"
+      shift
+      ;;
+  esac
+done
+
+requiere_root
+validar_usuario
+
+if [ "$ACCION" = "eliminar" ]; then
+  if [ -n "$CLAVE" ] || [ -n "$LLAVE_PUBLICA" ]; then
+    aviso "--clave y --ssh-pub-key se ignoran al usar --delete."
+  fi
+  eliminar_usuario
+else
+  verificaciones_previas
+  crear_usuario
+fi
