@@ -5,28 +5,39 @@ USUARIO=""
 JAIL=""
 JAIL_ORIGEN=""
 ELIMINAR=false
+PERMITIR_SHELL=false
+MODO_SFTP_EXPLICITO=false
+MODO_SHELL_EXPLICITO=false
 
 mostrar_ayuda() {
     cat <<EOF
 Uso: $0 [OPCIONES] --usuario USUARIO
 
-Crea o elimina un usuario con entorno chroot para SSH.
+Crea o elimina un usuario con entorno chroot para SSH/SFTP.
 
 Modo creación (por defecto):
   -u, --usuario USUARIO    Nombre del usuario (obligatorio)
   -j, --jail JAIL          Ruta del chroot destino (por defecto: /opt/jail/USUARIO)
   -o, --origen JAIL_ORIGEN Ruta del chroot de referencia (opcional)
+      --solo-sftp          Restringe al usuario a SFTP (por defecto)
+      --shell              Permite shell interactivo además de SFTP
   -h, --help               Muestra esta ayuda
 
 Modo eliminación:
   -d, --delete             Elimina el usuario, su chroot y configuración SSH
+
+Por defecto el usuario queda restringido a SFTP y usa el internal-sftp
+embebido en el sshd del host, sin copias dentro del chroot. Con --shell
+se conserva el shell interactivo y se configura el host con
+'Subsystem sftp internal-sftp' (afecta el SFTP de todo el host).
 
 Si no se especifica --origen, el script busca /opt/jail/siba.tar.gz.
 Si no existe el tarball, crea una base mínima manual con solo lo
 necesario para SSH/SFTP.
 
 Ejemplos:
-  $0 -u juan                       # crear usuario con base automática
+  $0 -u juan                       # crear usuario solo SFTP (base automática)
+  $0 -u juan --shell               # crear usuario con shell + SFTP
   $0 -u juan -o /opt/jail/base     # crear desde base existente
   $0 -d -u juan                    # eliminar usuario y limpiar
 EOF
@@ -60,6 +71,10 @@ eliminar_usuario() {
         echo "  ℹ️  No existe el chroot ${JAIL}"
     fi
 
+    if [ -f /etc/ssh/sshd_config.d/00-siba-sftp-internal.conf ]; then
+        echo "  ℹ️  Se conserva el drop-in global 00-siba-sftp-internal.conf (config del host)"
+    fi
+
     echo "🔍 Validando configuración SSH..."
     mkdir -p /run/sshd
     if sshd -t; then
@@ -74,6 +89,246 @@ systemctl restart "${SSH_SERVICE}"
 
     echo "✅ Usuario ${USUARIO} eliminado por completo"
     exit 0
+}
+
+# Asegura que el subsistema SFTP global use el internal-sftp embebido en sshd.
+# Solo se usa en modo --shell: en modo solo SFTP se fuerza por usuario con
+# ForceCommand internal-sftp y no se toca la configuración global.
+asegurar_internal_sftp_global() {
+    local dropin="/etc/ssh/sshd_config.d/00-siba-sftp-internal.conf"
+    local efectivo cmd args otros salida
+
+    echo "🔐 Verificando el subsistema SFTP global para el modo shell..."
+
+    mkdir -p /run/sshd /etc/ssh/sshd_config.d
+
+    if ! salida=$(sshd -T 2>/dev/null); then
+        echo "❌ No se pudo leer la configuración efectiva de sshd (sshd -T)"
+        return 1
+    fi
+
+    efectivo=$(echo "${salida}" | awk '/^subsystem[[:space:]]+sftp[[:space:]]/{print; exit}')
+
+    if [ -z "${efectivo}" ]; then
+        echo "❌ No se encontró una directiva 'Subsystem sftp' en la configuración de sshd"
+        return 1
+    fi
+
+    if echo "${efectivo}" | grep -q 'internal-sftp'; then
+        echo "✅ Subsystem sftp ya usa internal-sftp"
+        return 0
+    fi
+
+    cmd=$(echo "${efectivo}" | sed -E 's/^subsystem[[:space:]]+sftp[[:space:]]+//')
+
+    case "${cmd}" in
+        /usr/lib/openssh/sftp-server*)
+            args="${cmd#/usr/lib/openssh/sftp-server}"
+            ;;
+        *)
+            echo "❌ Subsystem sftp usa un wrapper o ruta no estándar: ${cmd}"
+            echo "   Ajusta manualmente ${dropin} o usa bind-mount del binario del host."
+            return 1
+            ;;
+    esac
+
+    otros=$(grep -rlE '^[[:space:]]*Subsystem[[:space:]]+sftp' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null | grep -v -F "${dropin}" || true)
+    if [ -n "${otros}" ]; then
+        echo "ℹ️  Otras definiciones de Subsystem sftp encontradas:"
+        echo "${otros}" | sed 's/^/   - /'
+        echo "   Se conservarán los argumentos de la configuración efectiva."
+    fi
+
+    {
+        echo "# Generado por siba-chroot-creation-user.sh"
+        echo "# Vincula el subsistema SFTP al sshd del host (internal-sftp)."
+        echo "Subsystem sftp internal-sftp${args}"
+    } > "${dropin}"
+    chmod 644 "${dropin}"
+
+    if ! sshd -t; then
+        rm -f "${dropin}"
+        echo "❌ Configuración SSH inválida; se revierte ${dropin}"
+        return 1
+    fi
+
+    if ! sshd -T 2>/dev/null | grep -qE '^subsystem[[:space:]]+sftp[[:space:]]+internal-sftp'; then
+        rm -f "${dropin}"
+        echo "⚠️  El drop-in no ganó por orden de Include; revisar /etc/ssh/sshd_config"
+        return 1
+    fi
+
+    echo "✅ Subsystem sftp ahora usa internal-sftp (${dropin})"
+    return 0
+}
+
+# --- Utilidades para preparar y poblar la base del chroot ------------------
+# La base puede venir en dos layouts distintos:
+#   * clásico:  bin/, lib/, lib64/ con el contenido real.
+#   * usrmerge: bin -> usr/bin, lib -> usr/lib, lib64 -> usr/lib64, o bien
+#               bin/, lib/, lib64/ materializados vacíos con el contenido
+#               real en usr/bin/, usr/lib/, usr/lib64/.
+# Estas funciones aceptan ambos para no depender de una ruta fija.
+
+base_tiene_binarios() {
+    local base="${1:-${JAIL_BASE}}"
+    find -L "${base}/bin" "${base}/usr/bin" -maxdepth 1 \
+        -type f -print -quit 2>/dev/null | grep -q .
+}
+
+base_tiene_librerias() {
+    local base="${1:-${JAIL_BASE}}"
+    find -L "${base}/lib" "${base}/lib64" "${base}/usr/lib" "${base}/usr/lib64" \
+        -maxdepth 4 -type f -name 'lib*.so*' -print -quit 2>/dev/null | grep -q .
+}
+
+base_es_valida() {
+    local base="${1:-${JAIL_BASE}}"
+    base_tiene_binarios "${base}" && base_tiene_librerias "${base}"
+}
+
+copiar_arbol() {
+    local origen="$1" destino="$2"
+    [ -d "${origen}" ] || return 0
+    mkdir -p "${destino}"
+    cp -a "${origen}/." "${destino}/" 2>/dev/null || true
+}
+
+buscar_binario_base() {
+    local nombre="$1" ruta
+    for ruta in "/bin/${nombre}" "/usr/bin/${nombre}" "/sbin/${nombre}" "/usr/sbin/${nombre}"; do
+        if [ -e "${JAIL_ORIGEN}${ruta}" ] || [ -L "${JAIL_ORIGEN}${ruta}" ]; then
+            printf '%s\n' "${JAIL_ORIGEN}${ruta}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+buscar_binario_host() {
+    local nombre="$1" ruta
+    for ruta in "/bin/${nombre}" "/usr/bin/${nombre}" "/sbin/${nombre}" "/usr/sbin/${nombre}"; do
+        if [ -f "${ruta}" ]; then
+            printf '%s\n' "${ruta}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+crear_base_minima() {
+    local base="$1"
+    local cmd lib linker f
+    local -a binarios
+
+    mkdir -p "${base}"/{bin,dev,etc,home,lib,lib64,proc,tmp,usr/bin,usr/lib,usr/lib64}
+
+    # Binarios mínimos para SSH + transferencia de archivos
+    binarios=(
+        /bin/dash      /bin/bash     /bin/sh
+        /bin/ls        /bin/cat      /bin/cp
+        /bin/mv        /bin/rm       /bin/mkdir
+        /bin/rmdir     /bin/chmod    /bin/touch
+        /bin/ln        /bin/pwd      /bin/echo
+        /bin/date      /bin/grep     /bin/sed
+        /bin/more
+    )
+
+    # El cliente scp solo se incluye si el usuario tendrá shell interactivo.
+    if [ "${PERMITIR_SHELL}" = true ]; then
+        binarios+=(/usr/bin/scp)
+    fi
+
+    for cmd in "${binarios[@]}"; do
+        if [ -f "$cmd" ]; then
+            install -m 755 "$cmd" "${base}${cmd}" 2>/dev/null || true
+        fi
+    done
+
+    # Resolver dependencias con ldd
+    for cmd in $(find "${base}/bin" "${base}/usr/bin" -type f 2>/dev/null); do
+        ldd "$cmd" 2>/dev/null | grep "=> /" | awk '{print $3}' | while read lib; do
+            if [ -f "$lib" ]; then
+                install -D -m 644 "$lib" "${base}${lib}" 2>/dev/null || true
+            fi
+        done
+    done
+
+    # Linker
+    for linker in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux.so.2 /lib64/ld-linux-aarch64.so.1; do
+        if [ -f "$linker" ]; then
+            install -D -m 755 "$linker" "${base}${linker}" 2>/dev/null || true
+        fi
+    done
+
+    # Archivos esenciales de /etc
+    for f in /etc/nsswitch.conf /etc/hosts /etc/host.conf /etc/resolv.conf /etc/localtime /etc/protocols /etc/services /etc/ld.so.conf; do
+        if [ -f "$f" ]; then
+            cp "$f" "${base}${f}" 2>/dev/null || true
+        fi
+    done
+
+    # Dispositivos
+    mknod -m 666 "${base}/dev/null" c 1 3 2>/dev/null || true
+    mknod -m 666 "${base}/dev/zero" c 1 5 2>/dev/null || true
+    mknod -m 644 "${base}/dev/random" c 1 8 2>/dev/null || true
+    mknod -m 644 "${base}/dev/urandom" c 1 9 2>/dev/null || true
+
+    # .bashrc base
+    mkdir -p "${base}/home/usuario"
+    cat > "${base}/home/usuario/.bashrc" << 'BASHRC'
+PS1='[\u@\h:\w]$ '
+export PATH=/bin:/usr/bin
+export TERM=xterm-256color
+alias ll='ls -la'
+BASHRC
+}
+
+reemplazar_base() {
+    local nueva="$1" vieja="${JAIL_BASE}.old"
+    rm -rf "${vieja}"
+    if [ -e "${JAIL_BASE}" ]; then
+        mv "${JAIL_BASE}" "${vieja}" || return 1
+    fi
+    if ! mv "${nueva}" "${JAIL_BASE}"; then
+        [ -e "${vieja}" ] && mv "${vieja}" "${JAIL_BASE}"
+        return 1
+    fi
+    rm -rf "${vieja}"
+}
+
+preparar_base() {
+    local tmp
+    mkdir -p "$(dirname "${JAIL_BASE}")"
+    if [ -f "${TAR_BASE}" ]; then
+        echo "📦 Usando archivo base ${TAR_BASE}"
+        if base_es_valida "${JAIL_BASE}"; then
+            echo "✅ Usando base existente válida en ${JAIL_BASE}"
+            return 0
+        fi
+        echo "⚠️  La base ${JAIL_BASE} no existe o está incompleta; se extrae de nuevo"
+        tmp="$(mktemp -d "${JAIL_BASE}.tmp.XXXXXX")" || return 1
+        # Se ignoran los errores de mknod: los dispositivos se crean después.
+        tar -xzf "${TAR_BASE}" -C "${tmp}" --strip-components=1 2>/dev/null || true
+        if ! base_es_valida "${tmp}"; then
+            echo "❌ El tarball ${TAR_BASE} no contiene binarios/librerías utilizables"
+            rm -rf "${tmp}"
+            return 1
+        fi
+        reemplazar_base "${tmp}" || { rm -rf "${tmp}"; return 1; }
+        echo "✅ Base extraída en ${JAIL_BASE}"
+    else
+        echo "📦 No se encontró ${TAR_BASE}, creando base mínima manual..."
+        tmp="$(mktemp -d "${JAIL_BASE}.tmp.XXXXXX")" || return 1
+        crear_base_minima "${tmp}"
+        if ! base_es_valida "${tmp}"; then
+            echo "❌ No fue posible crear una base mínima válida"
+            rm -rf "${tmp}"
+            return 1
+        fi
+        reemplazar_base "${tmp}" || { rm -rf "${tmp}"; return 1; }
+        echo "✅ Base mínima creada en ${JAIL_BASE}"
+    fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -94,6 +349,16 @@ while [[ $# -gt 0 ]]; do
             ELIMINAR=true
             shift
             ;;
+        --solo-sftp)
+            PERMITIR_SHELL=false
+            MODO_SFTP_EXPLICITO=true
+            shift
+            ;;
+        --shell|--permitir-shell)
+            PERMITIR_SHELL=true
+            MODO_SHELL_EXPLICITO=true
+            shift
+            ;;
         -h|--help)
             mostrar_ayuda
             ;;
@@ -104,6 +369,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [ "${MODO_SFTP_EXPLICITO}" = true ] && [ "${MODO_SHELL_EXPLICITO}" = true ]; then
+    echo "❌ Error: --solo-sftp y --shell son mutuamente excluyentes"
+    exit 1
+fi
 
 # Valores por defecto
 JAIL="${JAIL:-/opt/jail/${USUARIO}}"
@@ -124,84 +394,20 @@ TAR_BASE="/opt/jail/siba.tar.gz"
 JAIL_BASE="/opt/jail/siba-base"
 
 if [ -z "${JAIL_ORIGEN}" ]; then
-    if [ -f "${TAR_BASE}" ]; then
-        echo "📦 Usando archivo base ${TAR_BASE}"
-        if [ ! -d "${JAIL_BASE}" ]; then
-            mkdir -p "${JAIL_BASE}"
-            tar -xzf "${TAR_BASE}" -C "${JAIL_BASE}" --strip-components=1
-            echo "✅ Base extraída en ${JAIL_BASE}"
-        else
-            echo "✅ Usando base existente en ${JAIL_BASE}"
-        fi
-        JAIL_ORIGEN="${JAIL_BASE}"
-    else
-        echo "📦 No se encontró ${TAR_BASE}, creando base mínima manual..."
-        mkdir -p "${JAIL_BASE}"/{bin,dev,etc,home,lib,lib64,proc,tmp,usr/bin,usr/lib}
-
-        # Binarios mínimos para SSH + transferencia de archivos
-        BINARIOS=(
-            /bin/dash      /bin/bash     /bin/sh
-            /bin/ls        /bin/cat      /bin/cp
-            /bin/mv        /bin/rm       /bin/mkdir
-            /bin/rmdir     /bin/chmod    /bin/touch
-            /bin/ln        /bin/pwd      /bin/echo
-            /bin/date      /bin/grep     /bin/sed
-            /bin/more      /usr/bin/scp
-        )
-
-        for cmd in "${BINARIOS[@]}"; do
-            if [ -f "$cmd" ]; then
-                install -m 755 "$cmd" "${JAIL_BASE}${cmd}" 2>/dev/null || true
-            fi
-        done
-
-        # Resolver dependencias con ldd
-        for cmd in $(find "${JAIL_BASE}/bin" "${JAIL_BASE}/usr/bin" -type f 2>/dev/null); do
-            ldd "$cmd" 2>/dev/null | grep "=> /" | awk '{print $3}' | while read lib; do
-                if [ -f "$lib" ]; then
-                    install -D -m 644 "$lib" "${JAIL_BASE}${lib}" 2>/dev/null || true
-                fi
-            done
-        done
-
-        # Linker
-        for linker in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux.so.2; do
-            if [ -f "$linker" ]; then
-                install -D -m 755 "$linker" "${JAIL_BASE}${linker}" 2>/dev/null || true
-            fi
-        done
-
-        # Archivos esenciales de /etc
-        for f in /etc/nsswitch.conf /etc/hosts /etc/host.conf /etc/resolv.conf /etc/localtime /etc/protocols /etc/services /etc/ld.so.conf; do
-            if [ -f "$f" ]; then
-                cp "$f" "${JAIL_BASE}${f}" 2>/dev/null || true
-            fi
-        done
-
-        # Dispositivos
-        mknod -m 666 "${JAIL_BASE}/dev/null" c 1 3 2>/dev/null || true
-        mknod -m 666 "${JAIL_BASE}/dev/zero" c 1 5 2>/dev/null || true
-        mknod -m 644 "${JAIL_BASE}/dev/random" c 1 8 2>/dev/null || true
-        mknod -m 644 "${JAIL_BASE}/dev/urandom" c 1 9 2>/dev/null || true
-
-        # .bashrc base
-        mkdir -p "${JAIL_BASE}/home/usuario"
-        cat > "${JAIL_BASE}/home/usuario/.bashrc" << 'BASHRC'
-PS1='[\u@\h:\w]$ '
-export PATH=/bin:/usr/bin
-export TERM=xterm-256color
-alias ll='ls -la'
-BASHRC
-
-        echo "✅ Base mínima creada en ${JAIL_BASE}"
-        JAIL_ORIGEN="${JAIL_BASE}"
-    fi
+    preparar_base || exit 1
+    JAIL_ORIGEN="${JAIL_BASE}"
 fi
 
 # Verificar que existe el ${JAIL_ORIGEN} como referencia
 if [ ! -d "${JAIL_ORIGEN}" ]; then
     echo "❌ Error: No existe ${JAIL_ORIGEN} para copiar la configuración"
     exit 1
+fi
+
+# En modo shell se necesita que el subsistema SFTP global use internal-sftp,
+# porque 'Subsystem' no está permitido dentro de un bloque Match.
+if [ "${PERMITIR_SHELL}" = true ]; then
+    asegurar_internal_sftp_global || exit 1
 fi
 
 echo "📦 Creando chroot para ${USUARIO} (igual a ${JAIL_ORIGEN})"
@@ -221,7 +427,18 @@ GID_USUARIO=$(id -g ${USUARIO})
 
 # 2. Crear estructura de directorios
 echo "📁 Creando estructura de directorios..."
-mkdir -p "${JAIL}"/{bin,lib,lib64,etc,home/${USUARIO},dev,proc,tmp,usr/bin,usr/lib}
+# Se usa el layout usrmerge (igual que la base de referencia): bin, lib y lib64
+# son enlaces a usr/*. Así las rutas de los binarios, del intérprete ELF y de
+# ldd son coherentes sin depender del layout de la base de origen.
+mkdir -p "${JAIL}"/{etc,home/${USUARIO},dev,proc,tmp,usr/bin,usr/lib,usr/lib64,usr/sbin}
+for enlace in bin lib lib64; do
+    if [ -d "${JAIL}/${enlace}" ] && [ ! -L "${JAIL}/${enlace}" ]; then
+        mkdir -p "${JAIL}/usr/${enlace}"
+        cp -a "${JAIL}/${enlace}/." "${JAIL}/usr/${enlace}/" 2>/dev/null || true
+        rm -rf "${JAIL}/${enlace}"
+    fi
+    ln -sfn "usr/${enlace}" "${JAIL}/${enlace}"
+done
 
 # 3. Crear /etc/passwd (EXACTAMENTE como ${JAIL_ORIGEN})
 echo "📄 Creando /etc/passwd con solo root y ${USUARIO}..."
@@ -273,55 +490,134 @@ done
 # 8. NO copiar passwd, group, shadow, gshadow desde ${JAIL_ORIGEN}
 # (ya los creamos manualmente de forma segura)
 
-# 9. Copiar binarios y librerías (los mismos que en ${JAIL_ORIGEN})
+# 9. Copiar binarios y librerías
 echo "🔧 Copiando binarios y librerías..."
 
-# Primero, identificar qué binarios tiene ${JAIL_ORIGEN}
-if [ -d "${JAIL_ORIGEN}/bin" ]; then
-    BINARIOS_EXISTENTES=$( ls -1 "${JAIL_ORIGEN}/bin" 2>/dev/null)
-    for bin in ${BINARIOS_EXISTENTES}; do
-        if [ -f "/bin/${bin}" ]; then
-             cp -v "/bin/${bin}" "${JAIL}/bin/" 2>/dev/null || true
-        fi
-    done
-else
-    # Si no podemos listar, usar lista básica
-    COMANDOS_BASICOS=(
-        "/bin/bash"
-        "/bin/ls"
-        "/bin/cat"
-        "/bin/echo"
-        "/bin/pwd"
-        "/bin/mkdir"
-        "/bin/rm"
-        "/bin/cp"
-        "/bin/mv"
-        "/bin/chmod"
-        "/bin/date"
-        "/bin/whoami"
-    )
-    for cmd in "${COMANDOS_BASICOS[@]}"; do
-        if [ -f "$cmd" ]; then
-             cp -v "$cmd" "${JAIL}${cmd}" 2>/dev/null || true
-        fi
-    done
-fi
+declare -A BINARIOS_REQUERIDOS=()
 
-# Copiar librerías necesarias
-echo "📚 Copiando librerías..."
-for bin in $( ls -1 "${JAIL}/bin" 2>/dev/null); do
-    if [ -f "${JAIL}/bin/${bin}" ]; then
-        ldd "${JAIL}/bin/${bin}" 2>/dev/null | grep "=> /" | awk '{print $3}' | while read lib; do
-            if [ -f "$lib" ]; then
-                 cp -v --parents "$lib" "${JAIL}" 2>/dev/null || true
-            fi
-        done
-    fi
+# 9.1. Tomar como referencia todos los binarios de la base, estén en bin/ o en
+# usr/bin/. Antes solo se leía ${JAIL_ORIGEN}/bin, por lo que una base usrmerge
+# (contenido en usr/bin y bin vacío) dejaba el jail sin binarios.
+for dir_base in "${JAIL_ORIGEN}/bin" "${JAIL_ORIGEN}/usr/bin"; do
+    [ -d "${dir_base}" ] || continue
+    while IFS= read -r nombre; do
+        [ -n "${nombre}" ] && BINARIOS_REQUERIDOS["${nombre}"]=1
+    done < <(ls -1 "${dir_base}" 2>/dev/null)
 done
 
-# Copiar linker
- cp -v --parents /lib64/ld-linux-x86-64.so.2 "${JAIL}" 2>/dev/null || true
- cp -v --parents /lib/ld-linux.so.2 "${JAIL}" 2>/dev/null || true
+# 9.2. Mínimos indispensables, aunque la base esté incompleta.
+for nombre in dash bash sh ls cat cp mv rm mkdir rmdir chmod touch ln pwd echo date grep sed more; do
+    BINARIOS_REQUERIDOS["${nombre}"]=1
+done
+if [ "${PERMITIR_SHELL}" = true ]; then
+    BINARIOS_REQUERIDOS["scp"]=1
+fi
+
+BINARIOS_COPIADOS=0
+for nombre in "${!BINARIOS_REQUERIDOS[@]}"; do
+    # En modo solo SFTP no se copian clientes OpenSSH: también envejecen
+    # con cada actualización del host y no son necesarios en el chroot.
+    if [ "${PERMITIR_SHELL}" = false ] && { [ "${nombre}" = "scp" ] || [ "${nombre}" = "ssh" ]; }; then
+        echo "  ⏭️  Omitido (modo solo SFTP): ${nombre}"
+        continue
+    fi
+
+    origen_bin=""
+    if origen_bin=$(buscar_binario_base "${nombre}"); then
+        :
+    elif origen_bin=$(buscar_binario_host "${nombre}"); then
+        :
+    fi
+    if [ -z "${origen_bin}" ]; then
+        echo "  ⚠️  No se encontró el binario ${nombre} en la base ni en el host"
+        continue
+    fi
+
+    destino_bin="${JAIL}/usr/bin/${nombre}"
+    mkdir -p "$(dirname "${destino_bin}")"
+    # -L resuelve enlaces simbólicos (sh -> dash, vi -> alternatives, etc.)
+    if cp -fL "${origen_bin}" "${destino_bin}" 2>/dev/null; then
+        chmod 755 "${destino_bin}" 2>/dev/null || true
+        BINARIOS_COPIADOS=$((BINARIOS_COPIADOS + 1))
+    else
+        echo "  ⚠️  No se pudo copiar ${origen_bin} -> ${destino_bin}"
+    fi
+done
+echo "  ✅ ${BINARIOS_COPIADOS} binarios copiados en ${JAIL}/bin"
+
+# 9.3. Copiar los árboles de librerías de la base. Se cubren ambos layouts:
+# lib/ + lib64/ (clásico) y usr/lib/ + usr/lib64/ (usrmerge). Como el destino
+# también es usrmerge, lib y lib64 son enlaces y ambas rutas escriben en usr/.
+echo "📚 Copiando librerías..."
+for par in "lib:lib" "lib64:lib64"; do
+    origen_lib="${JAIL_ORIGEN}/${par%%:*}"
+    [ -d "${origen_lib}" ] || continue
+    copiar_arbol "${origen_lib}" "${JAIL}/usr/${par##*:}"
+done
+
+real_lib_origen="$(readlink -f "${JAIL_ORIGEN}/lib" 2>/dev/null || true)"
+real_usrlib_origen="$(readlink -f "${JAIL_ORIGEN}/usr/lib" 2>/dev/null || true)"
+if [ -n "${real_usrlib_origen}" ] && [ "${real_lib_origen}" != "${real_usrlib_origen}" ]; then
+    copiar_arbol "${JAIL_ORIGEN}/usr/lib" "${JAIL}/usr/lib"
+fi
+real_lib64_origen="$(readlink -f "${JAIL_ORIGEN}/lib64" 2>/dev/null || true)"
+real_usrlib64_origen="$(readlink -f "${JAIL_ORIGEN}/usr/lib64" 2>/dev/null || true)"
+if [ -n "${real_usrlib64_origen}" ] && [ "${real_lib64_origen}" != "${real_usrlib64_origen}" ]; then
+    copiar_arbol "${JAIL_ORIGEN}/usr/lib64" "${JAIL}/usr/lib64"
+fi
+
+# 9.4. Resolver dependencias restantes con ldd. Si la base no traía alguna
+# librería, se toma del host para que los binarios puedan ejecutarse.
+for bin in "${JAIL}"/usr/bin/*; do
+    [ -f "${bin}" ] || continue
+    ldd "${bin}" 2>/dev/null | grep "=> /" | awk '{print $3}' | while read -r lib; do
+        [ -n "${lib}" ] || continue
+        [ -e "${JAIL}${lib}" ] && continue
+        origen_lib=""
+        for candidato in "${JAIL_ORIGEN}${lib}" "${JAIL_ORIGEN}/usr${lib}" "${lib}" "/usr${lib}"; do
+            if [ -e "${candidato}" ]; then
+                origen_lib="${candidato}"
+                break
+            fi
+        done
+        [ -n "${origen_lib}" ] || continue
+        destino_lib="${JAIL}${lib}"
+        mkdir -p "$(dirname "${destino_lib}")"
+        cp -fL "${origen_lib}" "${destino_lib}" 2>/dev/null || true
+    done
+done
+
+# 9.5. Copiar el intérprete dinámico (linker), tomando la versión de la base
+# si existe. Se cubren x86_64 y aarch64.
+for linker in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux.so.2 /lib64/ld-linux-aarch64.so.1 /lib/ld-linux-aarch64.so.1; do
+    origen_linker=""
+    for candidato in "${JAIL_ORIGEN}${linker}" "${JAIL_ORIGEN}/usr${linker}" "${linker}"; do
+        if [ -e "${candidato}" ]; then
+            origen_linker="${candidato}"
+            break
+        fi
+    done
+    [ -n "${origen_linker}" ] || continue
+    destino_linker="${JAIL}${linker}"
+    mkdir -p "$(dirname "${destino_linker}")"
+    cp -fL "${origen_linker}" "${destino_linker}" 2>/dev/null || true
+    chmod 755 "${destino_linker}" 2>/dev/null || true
+done
+
+# 9.6. El subsistema SFTP debe usar el internal-sftp embebido en el sshd del
+# host, de modo que las actualizaciones de OpenSSH se apliquen al chroot.
+# Se elimina después de copiar librerías para que no se reintroduzca.
+rm -rf "${JAIL}/usr/lib/openssh" "${JAIL}/usr/lib/sftp-server"
+
+# 9.7. Verificación: no continuar en silencio si el jail quedó sin contenido.
+BINARIOS_JAIL=$(find "${JAIL}/usr/bin" -maxdepth 1 -type f -perm -u+x 2>/dev/null | wc -l)
+LIBRERIAS_JAIL=$(find -L "${JAIL}/usr/lib" "${JAIL}/usr/lib64" -maxdepth 4 -type f -name 'lib*.so*' 2>/dev/null | wc -l)
+if [ "${BINARIOS_JAIL}" -eq 0 ] || [ "${LIBRERIAS_JAIL}" -eq 0 ]; then
+    echo "❌ El chroot quedó incompleto: ${BINARIOS_JAIL} binarios y ${LIBRERIAS_JAIL} librerías."
+    echo "   Revise la base ${JAIL_ORIGEN} y vuelva a ejecutar el script."
+    exit 1
+fi
+echo "  ✅ ${LIBRERIAS_JAIL} librerías copiadas en ${JAIL}/lib"
 
 # 10. Crear dispositivos
 echo "🖥️   Creando dispositivos..."
@@ -338,6 +634,15 @@ chown -R "${USUARIO}:${USUARIO}" "${JAIL}/home/${USUARIO}"
 chmod 700 "${JAIL}/home/${USUARIO}"
 chmod 755 "${JAIL}"/{bin,lib,lib64,etc,dev}
 chmod 1777 "${JAIL}/tmp"
+
+# 11.1. Verificar que los binarios copiados pueden ejecutarse dentro del jail.
+if [ -x "${JAIL}/bin/sh" ]; then
+    if chroot "${JAIL}" /bin/sh -c 'exit 0' >/dev/null 2>&1; then
+        echo "✅ Prueba de ejecución dentro del chroot: OK"
+    else
+        echo "⚠️  /bin/sh no pudo ejecutarse dentro del chroot (revise librerías)"
+    fi
+fi
 
 # 12. Crear .bashrc (igual que ${JAIL_ORIGEN} probablemente)
 echo "📝 Creando .bashrc..."
@@ -359,33 +664,41 @@ chmod 644 "${JAIL}/home/${USUARIO}/.bashrc"
 echo "⚙️  Creando configuración SSH en ${SSHD_CONFIG}..."
 
 # Asegurar que el directorio existe
-#  mkdir -p /etc/ssh/sshd_config.d/
+mkdir -p /etc/ssh/sshd_config.d/
 
 # Crear el archivo de configuración específico para ${USUARIO}
-bash -c "cat > ${SSHD_CONFIG} << 'EOF'
-# Configuración chroot para ${USUARIO}
-# Creado: $(date)
-
-Match User ${USUARIO}
-    ChrootDirectory ${JAIL}
-    AllowTcpForwarding no
-    PermitTTY yes
-    X11Forwarding no
-    # ForceCommand /bin/bash  # Descomentar si se necesita forzar el shell
-EOF"
+{
+    echo "# Configuración chroot para ${USUARIO}"
+    echo "# Creado: $(date)"
+    echo ""
+    echo "Match User ${USUARIO}"
+    echo "    ChrootDirectory ${JAIL}"
+    echo "    AllowAgentForwarding no"
+    echo "    AllowTcpForwarding no"
+    echo "    AllowStreamLocalForwarding no"
+    echo "    PermitTunnel no"
+    echo "    X11Forwarding no"
+    if [ "${PERMITIR_SHELL}" = true ]; then
+        echo "    PermitTTY yes"
+    else
+        echo "    ForceCommand internal-sftp -d /home/${USUARIO}"
+        echo "    PermitTTY no"
+    fi
+} > "${SSHD_CONFIG}"
 
 # Establecer permisos correctos para el archivo SSH
 chmod 644 "${SSHD_CONFIG}"
 echo "✅ Archivo creado: ${SSHD_CONFIG}"
 
 # 14. Verificar que no haya conflictos con configuraciones existentes
-echo "🔍 Verificando que no haya configuraciones duplicadas en /etc/ssh/sshd_config..."
-if grep -q "Match User ${USUARIO}" /etc/ssh/sshd_config; then
-    echo "⚠️  ATENCIÓN: Se encontró una entrada para ${USUARIO} en /etc/ssh/sshd_config"
-    echo "   Recomiendo eliminarla para evitar conflictos"
-    echo "   Puedes hacerlo con:  sed -i '/Match User ${USUARIO}/,/^$/d' /etc/ssh/sshd_config"
+echo "🔍 Verificando configuraciones duplicadas para ${USUARIO}..."
+CONFLICTOS=$(grep -rlE "^[[:space:]]*Match[[:space:]]+User[[:space:]]+.*\b${USUARIO}\b" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null | grep -v -F "${SSHD_CONFIG}" || true)
+if [ -n "${CONFLICTOS}" ]; then
+    echo "⚠️  ATENCIÓN: Se encontraron entradas para ${USUARIO} en:"
+    echo "${CONFLICTOS}" | sed 's/^/   - /'
+    echo "   Recomiendo eliminarlas para evitar conflictos"
 else
-    echo "✅ No hay conflictos en /etc/ssh/sshd_config"
+    echo "✅ No hay conflictos de configuración para ${USUARIO}"
 fi
 
 # 15. Validar la configuración SSH antes de reiniciar
@@ -409,7 +722,16 @@ systemctl restart "${SSH_SERVICE:-ssh}"
 echo ""
 echo "✅ Usuario ${USUARIO} creado con chroot en ${JAIL}"
 echo ""
-echo "📊 Resumen de configuración (igual a ${JAIL_ORIGEN}):"
+echo "📊 Resumen de configuración:"
+if [ "${PERMITIR_SHELL}" = true ]; then
+    echo "   - Modo: shell + SFTP"
+    echo "   - SFTP: internal-sftp del sshd del host (Subsystem global)"
+else
+    echo "   - Modo: solo SFTP (sin shell interactivo)"
+    echo "   - SFTP: internal-sftp del sshd del host (ForceCommand por usuario)"
+    echo "   - Nota: scp -O (legacy) no funciona; use sftp o scp moderno"
+fi
+echo "   - sftp-server dentro del jail: NO (usa el del host)"
 echo "   - /etc/passwd: Solo root y ${USUARIO}"
 echo "   - /etc/shadow: NO EXISTE (autenticación por host)"
 echo "   - /etc/group: Solo root y ${USUARIO}"
@@ -424,7 +746,12 @@ echo "🔍 Verificar configuración SSH:"
 cat "${SSHD_CONFIG}"
 echo ""
 echo "🧪 Prueba la conexión:"
-echo "   ssh ${USUARIO}@localhost"
+echo "   sftp ${USUARIO}@localhost"
+if [ "${PERMITIR_SHELL}" = true ]; then
+    echo "   ssh ${USUARIO}@localhost"
+else
+    echo "   ssh ${USUARIO}@localhost   # debe cerrar: usuario restringido a SFTP"
+fi
 echo ""
 echo "📋 Para ver toda la configuración:"
 echo "    ls -la ${JAIL}/etc/"
