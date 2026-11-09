@@ -765,6 +765,31 @@ chmod 700 "${JAIL}/home/${USUARIO}"
 chmod 755 "${JAIL}"/{bin,lib,lib64,etc,dev}
 chmod 1777 "${JAIL}/tmp"
 
+# 11.2. OpenSSH exige que TODA la cadena de rutas del ChrootDirectory sea de
+# root y no escribible por group/other. Si algún padre (p. ej. /opt/jail con
+# 775) incumple, el login del usuario chroot se cierra en cuanto se abre la
+# sesión con: "fatal: bad ownership or modes for chroot directory component".
+asegurar_cadena_chroot() {
+    local ruta="${1}" padre
+    while [ "${ruta}" != "/" ] && [ -d "${ruta}" ]; do
+        padre="$(dirname "${ruta}")"
+        [ -d "${padre}" ] || break
+        if [ "$(stat -c '%u' "${padre}" 2>/dev/null)" != "0" ]; then
+            if chown root:root "${padre}"; then
+                echo "  ✅ ${padre}: propiedad corregida a root (exigido por sshd)"
+            fi
+        fi
+        if [ -n "$(find "${padre}" -maxdepth 0 \( -perm /g+w -o -perm /o+w \) -print 2>/dev/null)" ]; then
+            if chmod go-w "${padre}"; then
+                echo "  ✅ ${padre}: escritura group/other removida (exigido por sshd)"
+            fi
+        fi
+        ruta="${padre}"
+    done
+    return 0
+}
+asegurar_cadena_chroot "${JAIL}"
+
 # 11.1. Verificar que los binarios copiados pueden ejecutarse dentro del jail.
 if [ -x "${JAIL}/bin/sh" ]; then
     if chroot "${JAIL}" /bin/sh -c 'exit 0' >/dev/null 2>&1; then
