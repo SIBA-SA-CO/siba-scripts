@@ -868,6 +868,7 @@ SSH_SERVICE=$(systemctl list-units --type=service --state=running 2>/dev/null | 
 systemctl restart "${SSH_SERVICE:-ssh}"
 
 # 17. Verificar instalación
+# 
 echo ""
 echo "✅ Usuario ${USUARIO} creado con chroot en ${JAIL}"
 echo ""
