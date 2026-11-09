@@ -692,6 +692,10 @@ mkdir -p /etc/ssh/sshd_config.d/
     echo "# Creado: $(date)"
     echo ""
     echo "Match User ${USUARIO}"
+    echo "    # Habilitar autenticación por contraseña para este usuario aunque"
+    echo "    # la configuración global de sshd use 'PasswordAuthentication no'."
+    echo "    # Los valores dentro de un bloque Match tienen prioridad sobre los globales."
+    echo "    PasswordAuthentication yes"
     echo "    ChrootDirectory ${JAIL}"
     echo "    AllowAgentForwarding no"
     echo "    AllowTcpForwarding no"
@@ -732,6 +736,21 @@ else
     exit 1
 fi
 
+# Verificar que, para este usuario, la autenticación por contraseña quede
+# habilitada aunque la configuración global de sshd tenga
+# 'PasswordAuthentication no'. El bloque Match User tiene prioridad.
+PASSWORD_AUTH_EFECTIVA=$(sshd -T -C user=${USUARIO},host=localhost,addr=127.0.0.1 2>/dev/null \
+    | awk '$1 == "passwordauthentication" { print $2; exit }')
+if [ "${PASSWORD_AUTH_EFECTIVA}" = "yes" ]; then
+    echo "✅ PasswordAuthentication habilitado para ${USUARIO}"
+elif [ -n "${PASSWORD_AUTH_EFECTIVA}" ]; then
+    echo "⚠️  ATENCIÓN: PasswordAuthentication=${PASSWORD_AUTH_EFECTIVA} para ${USUARIO}"
+    echo "   El usuario podría no poder iniciar sesión con contraseña."
+    echo "   Revise ${SSHD_CONFIG} y la configuración global de sshd."
+else
+    echo "ℹ️  No se pudo verificar PasswordAuthentication con 'sshd -T -C'"
+fi
+
 # 16. Reiniciar SSH
 echo "🔄 Reiniciando servicio SSH..."
 # El servicio SSH puede llamarse sshd, ssh o ssh.service según la distro
@@ -752,6 +771,7 @@ else
     echo "   - Nota: scp -O (legacy) no funciona; use sftp o scp moderno"
 fi
 echo "   - sftp-server dentro del jail: NO (usa el del host)"
+echo "   - Autenticación por contraseña: habilitada para ${USUARIO}"
 echo "   - /etc/passwd: Solo root y ${USUARIO}"
 echo "   - /etc/shadow: NO EXISTE (autenticación por host)"
 echo "   - /etc/group: Solo root y ${USUARIO}"
