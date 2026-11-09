@@ -71,8 +71,9 @@ eliminar_usuario() {
         echo "  ℹ️  No existe el chroot ${JAIL}"
     fi
 
-    if [ -f /etc/ssh/sshd_config.d/00-siba-sftp-internal.conf ]; then
-        echo "  ℹ️  Se conserva el drop-in global 00-siba-sftp-internal.conf (config del host)"
+    if ls /etc/ssh/sshd_config.siba-bak /etc/ssh/sshd_config.d/*.siba-bak >/dev/null 2>&1; then
+        echo "  ℹ️  Se conserva el 'Subsystem sftp internal-sftp' global del host"
+        echo "     (respaldo en *.siba-bak)"
     fi
 
     echo "🔍 Validando configuración SSH..."
@@ -94,16 +95,28 @@ systemctl restart "${SSH_SERVICE}"
 # Asegura que el subsistema SFTP global use el internal-sftp embebido en sshd.
 # Solo se usa en modo --shell: en modo solo SFTP se fuerza por usuario con
 # ForceCommand internal-sftp y no se toca la configuración global.
+#
+# OpenSSH no permite definir 'Subsystem sftp' más de una vez. Por eso no se
+# agrega un drop-in: se reemplaza la definición existente (con respaldo), que
+# normalmente vive en /etc/ssh/sshd_config. Si la validación falla se restaura.
 asegurar_internal_sftp_global() {
     local dropin="/etc/ssh/sshd_config.d/00-siba-sftp-internal.conf"
-    local efectivo cmd args otros salida
+    local efectivo cmd archivo respaldo salida
 
     echo "🔐 Verificando el subsistema SFTP global para el modo shell..."
 
     mkdir -p /run/sshd /etc/ssh/sshd_config.d
 
+    # Limpiar el drop-in generado por versiones anteriores del script: era la
+    # causa del error "Subsystem 'sftp' already defined".
+    if [ -f "${dropin}" ] && grep -q 'Generado por siba-chroot-creation-user.sh' "${dropin}" 2>/dev/null; then
+        rm -f "${dropin}"
+        echo "ℹ️  Se eliminó ${dropin} (drop-in obsoleto de una versión anterior)"
+    fi
+
     if ! salida=$(sshd -T 2>/dev/null); then
         echo "❌ No se pudo leer la configuración efectiva de sshd (sshd -T)"
+        echo "   Revise la configuración de SSH antes de continuar."
         return 1
     fi
 
@@ -123,42 +136,49 @@ asegurar_internal_sftp_global() {
 
     case "${cmd}" in
         /usr/lib/openssh/sftp-server*)
-            args="${cmd#/usr/lib/openssh/sftp-server}"
             ;;
         *)
             echo "❌ Subsystem sftp usa un wrapper o ruta no estándar: ${cmd}"
-            echo "   Ajusta manualmente ${dropin} o usa bind-mount del binario del host."
+            echo "   Ajuste manualmente /etc/ssh/sshd_config para usar internal-sftp."
             return 1
             ;;
     esac
 
-    otros=$(grep -rlE '^[[:space:]]*Subsystem[[:space:]]+sftp' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null | grep -v -F "${dropin}" || true)
-    if [ -n "${otros}" ]; then
-        echo "ℹ️  Otras definiciones de Subsystem sftp encontradas:"
-        echo "${otros}" | sed 's/^/   - /'
-        echo "   Se conservarán los argumentos de la configuración efectiva."
+    # Localizar el archivo que contiene la definición activa de Subsystem sftp.
+    archivo=$(grep -rlE '^[[:space:]]*Subsystem[[:space:]]+sftp([[:space:]]|$)' \
+        /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | head -1)
+    if [ -z "${archivo}" ]; then
+        echo "❌ No se encontró el archivo que define 'Subsystem sftp'"
+        return 1
     fi
 
-    {
-        echo "# Generado por siba-chroot-creation-user.sh"
-        echo "# Vincula el subsistema SFTP al sshd del host (internal-sftp)."
-        echo "Subsystem sftp internal-sftp${args}"
-    } > "${dropin}"
-    chmod 644 "${dropin}"
+    respaldo="${archivo}.siba-bak"
+    cp -a "${archivo}" "${respaldo}" || {
+        echo "❌ No se pudo respaldar ${archivo}"
+        return 1
+    }
+
+    # Reemplazar únicamente la primera definición activa (no líneas comentadas).
+    if ! sed -i -E '0,/^[[:space:]]*Subsystem[[:space:]]+sftp([[:space:]]+.*)?$/s//Subsystem sftp internal-sftp/' "${archivo}"; then
+        cp -a "${respaldo}" "${archivo}"
+        echo "❌ No se pudo modificar ${archivo}; se restauró el respaldo"
+        return 1
+    fi
 
     if ! sshd -t; then
-        rm -f "${dropin}"
-        echo "❌ Configuración SSH inválida; se revierte ${dropin}"
+        cp -a "${respaldo}" "${archivo}"
+        echo "❌ Configuración SSH inválida; se restauró ${archivo} desde ${respaldo}"
         return 1
     fi
 
     if ! sshd -T 2>/dev/null | grep -qE '^subsystem[[:space:]]+sftp[[:space:]]+internal-sftp'; then
-        rm -f "${dropin}"
-        echo "⚠️  El drop-in no ganó por orden de Include; revisar /etc/ssh/sshd_config"
+        cp -a "${respaldo}" "${archivo}"
+        echo "⚠️  El cambio no quedó activo; se restauró ${archivo} desde ${respaldo}"
         return 1
     fi
 
-    echo "✅ Subsystem sftp ahora usa internal-sftp (${dropin})"
+    echo "✅ Subsystem sftp ahora usa internal-sftp (${archivo})"
+    echo "   Respaldo de la configuración anterior: ${respaldo}"
     return 0
 }
 
