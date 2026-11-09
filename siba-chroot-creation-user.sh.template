@@ -24,7 +24,11 @@ Modo creación (por defecto):
   -h, --help               Muestra esta ayuda
 
 Modo eliminación:
-  -d, --delete             Elimina el usuario, su chroot y configuración SSH
+  -d, --delete             Elimina el usuario y su chroot. El cambio global
+                           'Subsystem sftp internal-sftp -l VERBOSE' se conserva
+                           mientras existan otros usuarios chroot creados por
+                           este script; al borrar el último, sshd_config vuelve
+                           a su estado anterior (respaldo *.siba-bak)
 
 Por defecto el usuario queda restringido a SFTP y usa el internal-sftp
 embebido en el sshd del host, sin copias dentro del chroot. Con --shell
@@ -85,9 +89,46 @@ eliminar_usuario() {
         echo "  ℹ️  No existe el chroot ${JAIL}"
     fi
 
-    if ls /etc/ssh/sshd_config.siba-bak /etc/ssh/sshd_config.d/*.siba-bak >/dev/null 2>&1; then
-        echo "  ℹ️  Se conserva el 'Subsystem sftp internal-sftp -l VERBOSE' global del host"
-        echo "     (respaldo en *.siba-bak)"
+    # Regla de seguridad: la modificación global de sshd ('Subsystem sftp
+    # internal-sftp -l VERBOSE') pertenece al CONJUNTO de usuarios chroot del
+    # host, no al usuario que se elimina. Se conserva mientras quede algún otro
+    # usuario chroot creado por este script; solo se revierte cuando se borra
+    # el último, devolviendo sshd_config a su estado previo (desde *.siba-bak).
+    # /etc/fstab y el bind de /dev/log son por jail y ya se limpiaron arriba.
+    OTROS_CHROOT=$(grep -rl "Configuración chroot para" /etc/ssh/sshd_config.d/ \
+        --exclude='*.siba-bak' 2>/dev/null || true)
+    # Armar la lista de respaldos sin usar 'ls': si el glob no casa ningún
+    # archivo queda el literal y ls devuelve error AUNQUE exista el otro
+    # respaldo (eso saltaba la restauración en silencio).
+    RESPALDOS=()
+    for respaldo in /etc/ssh/sshd_config.siba-bak /etc/ssh/sshd_config.d/*.siba-bak; do
+        [ -f "${respaldo}" ] && RESPALDOS+=("${respaldo}")
+    done
+
+    if [ -n "${OTROS_CHROOT}" ]; then
+        echo "  ℹ️  Quedan otros usuarios chroot; se conserva el"
+        echo "     'Subsystem sftp internal-sftp -l VERBOSE' global (respaldo *.siba-bak):"
+        echo "${OTROS_CHROOT}" | sed 's/^/       - /'
+    elif [ "${#RESPALDOS[@]}" -gt 0 ]; then
+        echo "  ↩️  No quedan usuarios chroot: restaurando la configuración global de sshd..."
+        for respaldo in "${RESPALDOS[@]}"; do
+            original="${respaldo%.siba-bak}"
+            if ! cp -a "${respaldo}" "${original}"; then
+                echo "  ⚠️  No se pudo restaurar ${original}; se conserva ${respaldo}"
+                continue
+            fi
+            mkdir -p /run/sshd
+            if sshd -t >/dev/null 2>&1; then
+                rm -f "${respaldo}"
+                echo "  ✅ Restaurada la configuración anterior de ${original} (respaldo eliminado)"
+            else
+                echo "  ⚠️  sshd -t rechaza la configuración restaurada de ${original}"
+                echo "     Se conserva el respaldo ${respaldo} para revisión manual"
+            fi
+        done
+    else
+        echo "  ℹ️  Sin respaldos *.siba-bak: la configuración global de sshd no fue"
+        echo "     modificada por este script (o ya fue restaurada), no hay nada que revertir"
     fi
 
     echo "🔍 Validando configuración SSH..."
@@ -175,11 +216,16 @@ asegurar_internal_sftp_global() {
         return 1
     fi
 
+    # Respaldar SOLO si no existe uno previo: .siba-bak debe conservar el
+    # estado original (anterior a la creacion del primer usuario chroot),
+    # no un estado intermedio de ejecuciones anteriores de este script.
     respaldo="${archivo}.siba-bak"
-    cp -a "${archivo}" "${respaldo}" || {
+    if [ -e "${respaldo}" ]; then
+        echo "   (se conserva el respaldo original previo: ${respaldo})"
+    elif ! cp -a "${archivo}" "${respaldo}"; then
         echo "❌ No se pudo respaldar ${archivo}"
         return 1
-    }
+    fi
 
     # Reemplazar únicamente la primera definición activa (no líneas comentadas).
     if ! sed -i -E "0,/^[[:space:]]*Subsystem[[:space:]]+sftp([[:space:]]+.*)?\$/s//${linea_nueva}/" "${archivo}"; then
