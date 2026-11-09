@@ -29,7 +29,9 @@ Modo eliminación:
 Por defecto el usuario queda restringido a SFTP y usa el internal-sftp
 embebido en el sshd del host, sin copias dentro del chroot. Con --shell
 se conserva el shell interactivo y se configura el host con
-'Subsystem sftp internal-sftp' (afecta el SFTP de todo el host).
+'Subsystem sftp internal-sftp -l VERBOSE' (afecta el SFTP de todo el host).
+En ambos modos las operaciones de archivo por SFTP se registran en
+/var/log/auth.log del host (nivel VERBOSE).
 
 Si no se especifica --origen, el script busca /opt/jail/siba.tar.gz.
 Si no existe el tarball, crea una base mínima manual con solo lo
@@ -65,6 +67,18 @@ eliminar_usuario() {
     fi
 
     if [ -d "${JAIL}" ]; then
+        # Desmontar los bind mounts de la jail antes de borrarla (evita que
+        # rm -rf intente eliminar el socket /dev/log del host y deje basura).
+        while read -r _ mp _; do
+            case "${mp}" in
+                "${JAIL}"/*) umount "${mp}" 2>/dev/null || umount -l "${mp}" 2>/dev/null || true ;;
+            esac
+        done < /proc/mounts
+        grep -v "^[^ ]* ${JAIL}/" /etc/fstab > /etc/fstab.siba-tmp 2>/dev/null \
+            && grep -q " ${JAIL}/" /etc/fstab \
+            && mv /etc/fstab.siba-tmp /etc/fstab \
+            && echo "  ✅ Entrada de ${JAIL} eliminada de /etc/fstab"
+        rm -f /etc/fstab.siba-tmp
         rm -rf "${JAIL}"
         echo "  ✅ Chroot eliminado: ${JAIL}"
     else
@@ -72,7 +86,7 @@ eliminar_usuario() {
     fi
 
     if ls /etc/ssh/sshd_config.siba-bak /etc/ssh/sshd_config.d/*.siba-bak >/dev/null 2>&1; then
-        echo "  ℹ️  Se conserva el 'Subsystem sftp internal-sftp' global del host"
+        echo "  ℹ️  Se conserva el 'Subsystem sftp internal-sftp -l VERBOSE' global del host"
         echo "     (respaldo en *.siba-bak)"
     fi
 
@@ -92,16 +106,17 @@ systemctl restart "${SSH_SERVICE}"
     exit 0
 }
 
-# Asegura que el subsistema SFTP global use el internal-sftp embebido en sshd.
-# Solo se usa en modo --shell: en modo solo SFTP se fuerza por usuario con
-# ForceCommand internal-sftp y no se toca la configuración global.
+# Asegura que el subsistema SFTP global use internal-sftp con registro de
+# operaciones de archivo (nivel VERBOSE), de modo que las transferencias SFTP
+# queden en /var/log/auth.log. Solo se usa en modo --shell: en modo solo SFTP
+# se configura por usuario con ForceCommand y no se toca la configuración global.
 #
 # OpenSSH no permite definir 'Subsystem sftp' más de una vez. Por eso no se
 # agrega un drop-in: se reemplaza la definición existente (con respaldo), que
 # normalmente vive en /etc/ssh/sshd_config. Si la validación falla se restaura.
 asegurar_internal_sftp_global() {
     local dropin="/etc/ssh/sshd_config.d/00-siba-sftp-internal.conf"
-    local efectivo cmd archivo respaldo salida
+    local efectivo cmd archivo respaldo salida linea_nueva nivel_log="VERBOSE"
 
     echo "🔐 Verificando el subsistema SFTP global para el modo shell..."
 
@@ -127,22 +142,30 @@ asegurar_internal_sftp_global() {
         return 1
     fi
 
-    if echo "${efectivo}" | grep -q 'internal-sftp'; then
-        echo "✅ Subsystem sftp ya usa internal-sftp"
+    linea_nueva="Subsystem sftp internal-sftp -l ${nivel_log}"
+
+    # Ya está internal-sftp y además registra operaciones (VERBOSE o superior).
+    if echo "${efectivo}" | grep -q 'internal-sftp' \
+        && echo "${efectivo}" | grep -qE '(^|[[:space:]])-l[[:space:]]+(VERBOSE|DEBUG[0-9]*|[5-7])'; then
+        echo "✅ Subsystem sftp ya usa internal-sftp con logging ${nivel_log}"
         return 0
     fi
 
-    cmd=$(echo "${efectivo}" | sed -E 's/^subsystem[[:space:]]+sftp[[:space:]]+//')
+    # Si no usa internal-sftp, validar que sea el sftp-server estándar antes de
+    # reemplazarlo. Si ya usa internal-sftp solo falta agregar el nivel de log.
+    if ! echo "${efectivo}" | grep -q 'internal-sftp'; then
+        cmd=$(echo "${efectivo}" | sed -E 's/^subsystem[[:space:]]+sftp[[:space:]]+//')
 
-    case "${cmd}" in
-        /usr/lib/openssh/sftp-server*)
-            ;;
-        *)
-            echo "❌ Subsystem sftp usa un wrapper o ruta no estándar: ${cmd}"
-            echo "   Ajuste manualmente /etc/ssh/sshd_config para usar internal-sftp."
-            return 1
-            ;;
-    esac
+        case "${cmd}" in
+            /usr/lib/openssh/sftp-server*)
+                ;;
+            *)
+                echo "❌ Subsystem sftp usa un wrapper o ruta no estándar: ${cmd}"
+                echo "   Ajuste manualmente /etc/ssh/sshd_config para usar internal-sftp."
+                return 1
+                ;;
+        esac
+    fi
 
     # Localizar el archivo que contiene la definición activa de Subsystem sftp.
     archivo=$(grep -rlE '^[[:space:]]*Subsystem[[:space:]]+sftp([[:space:]]|$)' \
@@ -159,7 +182,7 @@ asegurar_internal_sftp_global() {
     }
 
     # Reemplazar únicamente la primera definición activa (no líneas comentadas).
-    if ! sed -i -E '0,/^[[:space:]]*Subsystem[[:space:]]+sftp([[:space:]]+.*)?$/s//Subsystem sftp internal-sftp/' "${archivo}"; then
+    if ! sed -i -E "0,/^[[:space:]]*Subsystem[[:space:]]+sftp([[:space:]]+.*)?\$/s//${linea_nueva}/" "${archivo}"; then
         cp -a "${respaldo}" "${archivo}"
         echo "❌ No se pudo modificar ${archivo}; se restauró el respaldo"
         return 1
@@ -171,13 +194,16 @@ asegurar_internal_sftp_global() {
         return 1
     fi
 
-    if ! sshd -T 2>/dev/null | grep -qE '^subsystem[[:space:]]+sftp[[:space:]]+internal-sftp'; then
+    efectivo=$(sshd -T 2>/dev/null | awk '/^subsystem[[:space:]]+sftp[[:space:]]/{print; exit}')
+    if ! echo "${efectivo}" | grep -q 'internal-sftp' \
+        || ! echo "${efectivo}" | grep -qE '(^|[[:space:]])-l[[:space:]]+VERBOSE'; then
         cp -a "${respaldo}" "${archivo}"
         echo "⚠️  El cambio no quedó activo; se restauró ${archivo} desde ${respaldo}"
         return 1
     fi
 
-    echo "✅ Subsystem sftp ahora usa internal-sftp (${archivo})"
+    echo "✅ Subsystem sftp ahora usa internal-sftp con logging ${nivel_log} (${archivo})"
+    echo "   Las operaciones SFTP se registrarán en /var/log/auth.log"
     echo "   Respaldo de la configuración anterior: ${respaldo}"
     return 0
 }
@@ -646,6 +672,44 @@ mknod -m 666 "${JAIL}/dev/zero" c 1 5 2>/dev/null || true
 mknod -m 644 "${JAIL}/dev/random" c 1 8 2>/dev/null || true
 mknod -m 644 "${JAIL}/dev/urandom" c 1 9 2>/dev/null || true
 
+# 10.1. Enlazar /dev/log dentro del jail para que el logging de
+# internal-sftp (-l VERBOSE) sobreviva al chroot. Sin esto, OpenSSH intenta
+# escribir al socket /dev/log ya dentro de la jail, no lo encuentra y las
+# operaciones de archivo se pierden en silencio (solo queda la autenticación,
+# que registra el sshd del host antes del chroot).
+asegurar_dev_log_jail() {
+    local jail="${1}" punto="${1}/dev/log" linea_fstab
+
+    mkdir -p "${jail}/dev"
+    [ -e "${punto}" ] || touch "${punto}" || {
+        echo "⚠️  No se pudo crear ${punto}; las transferencias SFTP no se registrarán."
+        return 0
+    }
+
+    if ! grep -q " ${punto} " /proc/mounts 2>/dev/null; then
+        if mount --bind /dev/log "${punto}" 2>/dev/null; then
+            echo "  ✅ /dev/log enlazado en ${punto}"
+        else
+            echo "⚠️  No se pudo montar --bind /dev/log en ${punto}."
+            echo "   Las operaciones de archivo por SFTP no se registrarán en /var/log/auth.log."
+            return 0
+        fi
+    else
+        echo "  ℹ️  /dev/log ya estaba enlazado en ${punto}"
+    fi
+
+    # Persistir el montaje entre reinicios (nofail evita arrancue errores si
+    # la jail se elimina manualmente).
+    linea_fstab="/dev/log ${punto} none bind,nofail,noatime 0 0"
+    if ! grep -qF "${punto}" /etc/fstab 2>/dev/null; then
+        if echo "${linea_fstab}" >> /etc/fstab; then
+            echo "  ✅ Entrada agregada a /etc/fstab (persistencia del log SFTP)"
+        fi
+    fi
+    return 0
+}
+asegurar_dev_log_jail "${JAIL}"
+
 # 11. Configurar permisos (igual que ${JAIL_ORIGEN})
 echo "🔐 Configurando permisos..."
 chown root:root "${JAIL}"
@@ -705,7 +769,7 @@ mkdir -p /etc/ssh/sshd_config.d/
     if [ "${PERMITIR_SHELL}" = true ]; then
         echo "    PermitTTY yes"
     else
-        echo "    ForceCommand internal-sftp -d /home/${USUARIO}"
+        echo "    ForceCommand internal-sftp -l VERBOSE -d /home/${USUARIO}"
         echo "    PermitTTY no"
     fi
 } > "${SSHD_CONFIG}"
@@ -771,6 +835,8 @@ else
     echo "   - Nota: scp -O (legacy) no funciona; use sftp o scp moderno"
 fi
 echo "   - sftp-server dentro del jail: NO (usa el del host)"
+echo "   - Log SFTP: operaciones de archivo en /var/log/auth.log (nivel VERBOSE)"
+echo "   - /dev/log enlazado en la jail: necesario para que internal-sftp registre tras el chroot"
 echo "   - Autenticación por contraseña: habilitada para ${USUARIO}"
 echo "   - /etc/passwd: Solo root y ${USUARIO}"
 echo "   - /etc/shadow: NO EXISTE (autenticación por host)"
