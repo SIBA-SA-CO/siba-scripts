@@ -56,6 +56,16 @@ eliminar_usuario() {
 
     echo "🗑️  Eliminando usuario ${USUARIO}..."
 
+    # 0) BLOQUEAR la cuenta ANTES de tocar la configuración. Si más adelante
+    #    algún paso falla (p. ej. userdel con sesiones activas), el usuario no
+    #    podrá iniciar sesión: sin esto, al borrar el drop-in Match quedaría
+    #    una cuenta viva SIN chroot y caería en / del host.
+    if id "${USUARIO}" &>/dev/null; then
+        if usermod -L -e 1 "${USUARIO}" 2>/dev/null; then
+            echo "  🔒 Cuenta bloqueada y expirada (no podrá iniciar sesión)"
+        fi
+    fi
+
     if [ -f "${SSHD_CONFIG}" ]; then
         rm -f "${SSHD_CONFIG}"
         echo "  ✅ Configuración SSH eliminada: ${SSHD_CONFIG}"
@@ -64,8 +74,23 @@ eliminar_usuario() {
     fi
 
     if id "${USUARIO}" &>/dev/null; then
-        userdel -r "${USUARIO}" 2>/dev/null
-        echo "  ✅ Usuario ${USUARIO} eliminado del sistema"
+        # userdel falla si hay sesiones/procesos activos; se termina la sesión
+        # de logind y los procesos del usuario ANTES de intentar borrar.
+        loginctl terminate-user "${USUARIO}" 2>/dev/null || true
+        pkill -u "${USUARIO}" 2>/dev/null || true
+        sleep 2
+        # No se oculta stderr: el resultado de userdel se muestra y se valida.
+        if SALIDA_USERDEL=$(userdel -r "${USUARIO}" 2>&1); then
+            echo "  ✅ Usuario ${USUARIO} eliminado del sistema"
+        else
+            echo "  ⚠️  userdel -r falló: ${SALIDA_USERDEL}"
+            echo "     Reintentando con forzado (userdel -rf)..."
+            if SALIDA_USERDEL=$(userdel -rf "${USUARIO}" 2>&1); then
+                echo "  ✅ Usuario ${USUARIO} eliminado del sistema (forzado)"
+            else
+                echo "  ❌ No se pudo eliminar la cuenta ${USUARIO}: ${SALIDA_USERDEL}"
+            fi
+        fi
     else
         echo "  ℹ️  El usuario ${USUARIO} no existe en el sistema"
     fi
@@ -84,7 +109,11 @@ eliminar_usuario() {
             && echo "  ✅ Entrada de ${JAIL} eliminada de /etc/fstab"
         rm -f /etc/fstab.siba-tmp
         rm -rf "${JAIL}"
-        echo "  ✅ Chroot eliminado: ${JAIL}"
+        if [ -d "${JAIL}" ]; then
+            echo "  ❌ Quedó contenido en ${JAIL} (montaje sin desmontar? revisar)"
+        else
+            echo "  ✅ Chroot eliminado: ${JAIL}"
+        fi
     else
         echo "  ℹ️  No existe el chroot ${JAIL}"
     fi
@@ -141,6 +170,25 @@ systemctl restart "${SSH_SERVICE}"
         echo "✅ SSH reiniciado correctamente"
     else
         echo "⚠️  Configuración SSH inválida, revisar manualmente"
+    fi
+
+    # Verificación final: no declarar éxito si algo quedó vivo. Un usuario
+    # chroot a medio borrar es un agujero (cuenta sin chroot que cae en /).
+    QUEDARON=""
+    if id "${USUARIO}" &>/dev/null; then
+        QUEDARON="${QUEDARON}  - la cuenta de sistema (${USUARIO})\n"
+        echo "  ⚠️  LA CUENTA SIGUE EXISTENTE. Mientras exista, no podrá iniciar"
+        echo "     sesión (bloqueada/expirada arriba), pero borrar este aviso:"
+        echo "     revise sesiones activas (loginctl list-users, ps -u ${USUARIO})"
+        echo "     y ejecute manualmente: userdel -rf ${USUARIO}"
+    fi
+    [ -d "${JAIL}" ] && QUEDARON="${QUEDARON}  - el chroot ${JAIL}\n"
+    [ -f "${SSHD_CONFIG}" ] && QUEDARON="${QUEDARON}  - la configuración ${SSHD_CONFIG}\n"
+    if [ -n "${QUEDARON}" ]; then
+        echo ""
+        echo "❌ Eliminación INCOMPLETA; persisten:"
+        printf "%b" "${QUEDARON}"
+        exit 1
     fi
 
     echo "✅ Usuario ${USUARIO} eliminado por completo"
